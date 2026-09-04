@@ -106,6 +106,7 @@
 #include "npc_ai_tactical.h"
 #include "npc_ai_watchlist.h"
 #include "npc_ai_action_parser.h"
+#include "npc_ai_order_intent.h"
 #include "npc_ai_pickup.h"
 #include "npc_ai_batch_pickup.h"
 #include "npc_ai_wield.h"
@@ -1461,6 +1462,17 @@ void game::ai_talk( const std::vector<npc *> &talkers, const std::string &select
     }
 
     if( selection.everyone ) {
+        // Second-stage order recognition: a short imperative that no keyword
+        // parser matched goes to the model-backed classifier before it is
+        // treated as conversation.  The completion either executes the order
+        // or forwards the line to group dialogue itself.
+        if( npc_ai::order_intent_candidate( player_line ) &&
+            npc_ai::enqueue_order_intent_resolution( *guy, player_line, true,
+                    selection.targets.size() ) ) {
+            log_command_intercept( "ORDER_INTENT", "PENDING" );
+            add_msg( m_info, _( "Talking with everyone..." ) );
+            return;
+        }
         const std::uint64_t conversation_turn_id = npc_ai::next_conversation_turn_id();
         const std::size_t accepted = npc_ai::enqueue_group_ai_dialogue( selection.targets,
                                      player_line, conversation_turn_id );
@@ -1546,6 +1558,13 @@ void game::ai_talk( const std::vector<npc *> &talkers, const std::string &select
             npc_ai::say_command_reply( *guy, wield_result.message );
             npc_ai::remember_exchange( *guy, player_line, wield_result.message );
         }
+        return;
+    }
+
+    if( npc_ai::order_intent_candidate( player_line ) &&
+        npc_ai::enqueue_order_intent_resolution( *guy, player_line, false, 1 ) ) {
+        log_command_intercept( "ORDER_INTENT", "PENDING" );
+        add_msg( m_info, string_format( _( "Talking with %s..." ), guy->get_name() ) );
         return;
     }
 

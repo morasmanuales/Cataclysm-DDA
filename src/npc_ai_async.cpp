@@ -25,6 +25,7 @@
 #include "npc_ai_event_stream.h"
 #include "npc_ai_fire.h"
 #include "npc_ai_goal.h"
+#include "npc_ai_order_intent.h"
 #include "npc_ai_pickup.h"
 #include "npc_ai_spontaneous.h"
 #include "npc_ai_survival.h"
@@ -581,6 +582,8 @@ const char *request_type_name( const ai_request_type type )
             return "PICKUP";
         case ai_request_type::wield_resolution:
             return "WIELD";
+        case ai_request_type::order_resolution:
+            return "ORDER";
     }
     return "UNKNOWN";
 }
@@ -1078,18 +1081,22 @@ ai_enqueue_result enqueue_command_resolution(
     const npc &who, const ai_request_type type, const std::string &player_line,
     const std::string &prompt, std::vector<ai_target_snapshot> targets,
     const acquisition_intent acquisition,
-    const std::string &acquisition_intent_source )
+    const std::string &acquisition_intent_source,
+    const std::string &event_detail )
 {
     ai_request_snapshot request;
     request.priority = ai_request_priority::player_dialogue;
     request.type = type;
     request.origin = conversation_origin::direct_player_dialogue;
     request.prompt = prompt;
+    request.event_detail = event_detail;
     const npc_prompt_purpose purpose =
         type == ai_request_type::watch_resolution
         ? npc_prompt_purpose::watch_resolution
         : type == ai_request_type::pickup_resolution
         ? npc_prompt_purpose::pickup_resolution
+        : type == ai_request_type::order_resolution
+        ? npc_prompt_purpose::order_resolution
         : npc_prompt_purpose::wield_resolution;
     request.system_prompt = build_npc_system_prompt( who, purpose );
     request.player_line = player_line;
@@ -1210,6 +1217,11 @@ completion_apply_result apply_ai_completion( ai_request_completion &completion,
     }
     if( request.type == ai_request_type::wield_resolution ) {
         apply_wield_ai_completion( *who, completion );
+        result.applied = true;
+        return result;
+    }
+    if( request.type == ai_request_type::order_resolution ) {
+        apply_order_intent_completion( *who, completion );
         result.applied = true;
         return result;
     }

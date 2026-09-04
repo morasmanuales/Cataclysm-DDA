@@ -33,7 +33,8 @@ enum class npc_prompt_purpose : int {
     combat_social,
     watch_resolution,
     pickup_resolution,
-    wield_resolution
+    wield_resolution,
+    order_resolution
 };
 
 context_intent classify_context_intent( const std::string &player_line );

@@ -923,6 +923,7 @@ std::string build_npc_system_prompt( const npc &who,
             case npc_prompt_purpose::watch_resolution:
             case npc_prompt_purpose::pickup_resolution:
             case npc_prompt_purpose::wield_resolution:
+            case npc_prompt_purpose::order_resolution:
                 break;
         }
 
@@ -1020,6 +1021,22 @@ std::string build_npc_system_prompt( const npc &who,
                    << "razonable, puedes elegirlo. Devuelve exactamente una linea: "
                    "WIELD_INDEX=N, sin "
                    << "explicacion.";
+            break;
+        case npc_prompt_purpose::order_resolution:
+            system << ( spanish ?
+                        "Eres exclusivamente un clasificador de ordenes habladas para companeros "
+                        "de Cataclysm: Dark Days Ahead. No conversas, no explicas, no ejecutas nada. "
+                        "Recibes una frase del jugador y un catalogo cerrado; eliges una entrada "
+                        "del catalogo o NONE. Una pregunta, una charla, una opinion, una promesa o "
+                        "un plan para mas tarde son NONE. Solo un imperativo claro y presente "
+                        "dirigido al companero es una orden. Ante cualquier duda, NONE. Nunca "
+                        "inventes objetos ni anadas texto fuera de las dos lineas pedidas." :
+                        "You are strictly a spoken-order classifier for Cataclysm: Dark Days Ahead "
+                        "companions. You do not converse, explain, or execute anything. You get one "
+                        "player line and a closed catalogue; pick one catalogue entry or NONE. A "
+                        "question, chat, opinion, promise or plan for later is NONE. Only a clear, "
+                        "present-tense imperative aimed at the companion is an order. When in any "
+                        "doubt, NONE. Never invent items or add text beyond the two requested lines." );
             break;
         case npc_prompt_purpose::direct_dialogue:
         case npc_prompt_purpose::spontaneous_dialogue:

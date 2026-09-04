@@ -47,7 +47,8 @@ enum class ai_request_type : int {
     legacy_prompt,
     watch_resolution,
     pickup_resolution,
-    wield_resolution
+    wield_resolution,
+    order_resolution
 };
 
 enum class conversation_origin : int {
@@ -286,7 +287,8 @@ ai_enqueue_result enqueue_command_resolution(
     const npc &who, ai_request_type type, const std::string &player_line,
     const std::string &prompt, std::vector<ai_target_snapshot> targets = {},
     acquisition_intent acquisition = acquisition_intent::automatic,
-    const std::string &acquisition_intent_source = "" );
+    const std::string &acquisition_intent_source = "",
+    const std::string &event_detail = "" );
 
 // Delivers a reply to an explicit player order immediately through CDDA's
 // normal speech/hearing channel.  Async completions arrive after the regular

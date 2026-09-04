@@ -25,6 +25,10 @@ struct tactical_order_result {
 tactical_order parse_tactical_order( const std::string &player_line );
 tactical_order_result execute_tactical_order( const std::vector<npc *> &targets,
         const std::string &player_line );
+// Same execution for an order already classified elsewhere (model-backed
+// intent path in npc_ai_order_intent.cpp).
+tactical_order_result execute_tactical_order( const std::vector<npc *> &targets,
+        tactical_order order );
 
 } // namespace npc_ai
 
