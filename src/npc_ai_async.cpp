@@ -9,6 +9,7 @@
 
 #include "avatar.h"
 #include "calendar.h"
+#include "color.h"
 #include "debug.h"
 #include "game.h"
 #include "messages.h"
@@ -1110,9 +1111,14 @@ ai_enqueue_result enqueue_command_resolution(
     return get_ai_request_queue().enqueue( std::move( request ) );
 }
 
+void say_ai_line( const npc &who, const std::string &text, const sounds::sound_t priority )
+{
+    who.say_colored( text, c_green, c_cyan, priority );
+}
+
 void say_command_reply( npc &who, const std::string &message )
 {
-    who.say( message, sounds::sound_t::order );
+    say_ai_line( who, message, sounds::sound_t::order );
     // process_ai_completions() and the talk command both run after the normal
     // sound-marker pass for this input cycle.  Flush just-created speech now
     // so the player sees the answer before issuing another command.
@@ -1259,7 +1265,7 @@ completion_apply_result apply_ai_completion( ai_request_completion &completion,
         return result;
     }
     measure_main_thread_phase( collect_timings, result.timings.say_us, [&]() {
-        who->say( npc_line );
+        say_ai_line( *who, npc_line );
     } );
     measure_main_thread_phase( collect_timings, result.timings.memory_us, [&]() {
         remember_exchange( *who, request.player_line, npc_line );

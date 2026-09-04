@@ -649,7 +649,8 @@ void sounds::process_sound_markers( Character *you )
         if( you->is_npc() ) {
             if( !sound.ambient ) {
                 npc *guy = dynamic_cast<npc *>( you );
-                guy->handle_sound( sound.category, description, heard_volume, pos );
+                // CDDA-AI: coloured speech carries display-only colour tags.
+                guy->handle_sound( sound.category, remove_color_tags( description ), heard_volume, pos );
             }
             continue;
         }
@@ -662,9 +663,10 @@ void sounds::process_sound_markers( Character *you )
         if( !sound.ambient && ( pos != you->pos_bub() ) && !here.pl_sees( pos, distance_to_sound ) ) {
             if( uistate.distraction_noise &&
                 !you->activity.is_distraction_ignored( distraction_type::noise ) &&
-                !get_safemode().is_sound_safe( sound.description, distance_to_sound, you->controlling_vehicle ) ) {
+                !get_safemode().is_sound_safe( remove_color_tags( sound.description ), distance_to_sound,
+                                               you->controlling_vehicle ) ) {
                 const std::string query = string_format( _( "Heard %s!" ),
-                                          trim_trailing_punctuations( description ) );
+                                          trim_trailing_punctuations( remove_color_tags( description ) ) );
                 g->cancel_activity_or_ignore_query( distraction_type::noise, query );
             }
         }

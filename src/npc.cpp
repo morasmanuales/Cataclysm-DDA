@@ -1891,11 +1891,24 @@ void npc::decide_needs()
 
 void npc::say( const std::string &line, const sounds::sound_t spriority ) const
 {
+    say_colored( line, c_unset, c_unset, spriority );
+}
+
+void npc::say_colored( const std::string &line, const nc_color name_color,
+                       const nc_color text_color, const sounds::sound_t spriority ) const
+{
     std::string formatted_line = line;
     Character &player_character = get_player_character();
     parse_tags( formatted_line, player_character, *this );
     if( is_mute() ) {
         return;
+    }
+    // Colour only the presentation.  sounds.cpp strips the tags again before
+    // handing the description to NPC hearing and to safe mode.
+    const std::string shown_name = name_color == c_unset ? get_name() : colorize( get_name(),
+                                   name_color );
+    if( text_color != c_unset ) {
+        formatted_line = colorize( formatted_line, text_color );
     }
 
     if( player_character.is_deaf() && !player_character.is_blind() ) {
@@ -1908,11 +1921,11 @@ void npc::say( const std::string &line, const sounds::sound_t spriority ) const
     }
     // Hallucinations don't make noise when they speak
     if( is_hallucination() ) {
-        add_msg( _( "%1$s saying \"%2$s\"" ), get_name(), formatted_line );
+        add_msg( _( "%1$s saying \"%2$s\"" ), shown_name, formatted_line );
         return;
     }
 
-    std::string sound = string_format( _( "%1$s saying \"%2$s\"" ), get_name(), formatted_line );
+    std::string sound = string_format( _( "%1$s saying \"%2$s\"" ), shown_name, formatted_line );
 
     // Sound happens even if we can't hear it
     if( spriority == sounds::sound_t::order || spriority == sounds::sound_t::alert ) {

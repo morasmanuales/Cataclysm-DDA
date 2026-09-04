@@ -1846,7 +1846,7 @@ bool emit_due_combat_line( npc &speaker,
     }
 
     measure_completion_phase( timings == nullptr ? nullptr : &timings->say_us, [&]() {
-        speaker.say( selected->text, sounds::sound_t::alert );
+        npc_ai::say_ai_line( speaker, selected->text, sounds::sound_t::alert );
     } );
     last_group_line_turn = now;
     combat_states[speaker_id].last_spoken_turn = now;
@@ -3179,7 +3179,7 @@ void apply_combat_social_ai_completion( npc &who, const ai_request_completion &c
         return;
     }
     measure_completion_phase( timings == nullptr ? nullptr : &timings->say_us, [&]() {
-        who.say( spoken, sounds::sound_t::alert );
+        say_ai_line( who, spoken, sounds::sound_t::alert );
     } );
     state.last_spoken_turn = current.turn;
     ++social_metrics.candidates_validated;

@@ -16,6 +16,7 @@
 
 #include "npc_ai_client.h"
 #include "npc_ai_pickup.h"
+#include "sounds.h"
 
 class npc;
 
@@ -295,6 +296,12 @@ ai_enqueue_result enqueue_command_resolution(
 // sound-marker pass for the current input cycle, so leaving them queued until
 // the next cycle can make a failed order appear to receive no answer.
 void say_command_reply( npc &who, const std::string &message );
+
+// Every line produced by the NPC AI goes through here so it is recognisable
+// in the message log: speaker name in green, words in cyan.  Vanilla chatter
+// keeps the default colour.
+void say_ai_line( const npc &who, const std::string &text,
+                  sounds::sound_t priority = sounds::sound_t::speech );
 
 // Must only be called by the main game thread.
 void process_ai_completions();

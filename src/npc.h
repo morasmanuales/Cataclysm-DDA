@@ -1009,6 +1009,11 @@ class npc : public Character
             return say( string_format( line, std::forward<Args>( args )... ) );
         }
         void say( const std::string &line, sounds::sound_t spriority = sounds::sound_t::speech ) const;
+        // CDDA-AI: same as say(), but the log line shows the speaker's name and
+        // the spoken words in the given colours so AI dialogue stands out from
+        // vanilla chatter.  Colour tags never reach NPC hearing or safe mode.
+        void say_colored( const std::string &line, nc_color name_color, nc_color text_color,
+                          sounds::sound_t spriority = sounds::sound_t::speech ) const;
         int indoor_voice() const;
         void decide_needs();
         void reboot();

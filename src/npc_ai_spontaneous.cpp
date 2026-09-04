@@ -1926,7 +1926,7 @@ void apply_spontaneous_ai_completion( npc &who, const ai_request_completion &com
     }
 
     measure_completion_phase( timings == nullptr ? nullptr : &timings->say_us, [&]() {
-        who.say( spoken );
+        say_ai_line( who, spoken );
     } );
     state.last_spoken_turn = now;
     global_last_spoken_turn = now;

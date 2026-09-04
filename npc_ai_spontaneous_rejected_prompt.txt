@@ -1,0 +1,115 @@
+=== ESTADO REAL DEL NPC ===
+Nombre: Nila Cortez
+Estado actual: Protegiendo
+Actividad actual: nada
+Aliado del jugador: si
+Objeto o arma empunada: bate de béisbol
+Origen de tus objetos: desconocido (no inventes donde los conseguiste)
+Companeros visibles ahora: el jugador (distancia 9), Hiram Price (distancia 2, herido)
+Relacion con jugador: confianza=4; miedo=1; valor=-1; ira=1
+
+=== MEMORIA PERSONAL DEL NPC ===
+Estas son conversaciones que realmente tuviste anteriormente con el jugador.
+
+REGLAS IMPORTANTES DE MEMORIA:
+- Los mensajes anteriores del jugador son la fuente principal para recordar datos que el jugador te dijo.
+- Si el jugador afirmo explicitamente un dato anteriormente, debes considerarlo un recuerdo valido.
+- Una respuesta previa tuya diciendo que no sabias algo NO invalida un dato que el jugador ya te habia dicho.
+- Tus respuestas previas sirven para mantener continuidad, pero tienen menor prioridad que los hechos dichos por el jugador.
+- Antes de responder una pregunta sobre el pasado, revisa primero los mensajes anteriores del jugador.
+- No inventes recuerdos que no aparezcan aqui.
+
+=== MENSAJES ANTERIORES DEL JUGADOR ===
+- [EVENTO ESPONTANEO LOCATION_CHANGED] [LOCATION_CHANGED] Entramos o nos desplazamos a: campo
+- [EVENTO ESPONTANEO NPC_TO_NPC_REPLY] Hiram Price dijo: Este lugar me da escalofríos.
+- No me sigan
+- Metanse a la casa
+- Vengan
+- [EVENTO ESPONTANEO NPC_TO_NPC_REPLY] Hiram Price dijo: Este lugar huele a muerte.
+
+=== TUS RESPUESTAS ANTERIORES (PRIORIDAD MENOR) ===
+- Me duele bastante, pero sigo adelante.
+- Espera, ¿qué lugar?
+- No te seguiré más. Estoy contigo, pero haré lo que digas.
+- No sé cómo decirlo.
+- Voy contigo. Mantén el ritmo.
+- ¿A qué te refieres?
+
+=== HABLA RECIENTE: IDEAS/FRASES QUE NO DEBES REPETIR ===
+- idea=NPC_TO_NPC_REPLY; frase="¿A qué te refieres?"
+Estas frases sirven solo para evitar repeticion; no son evidencia de que su contenido siga siendo cierto ahora.
+No reformules esas mismas ideas. No vuelvas a usar inmediatamente un nombre que aparezca en esas frases salvo que una urgencia real lo exija.
+
+=== INSTANTÁNEA SENSORIAL ACTUAL DEL NPC ===
+Todo dato marcado ACTUAL fue percibido en esta evaluación.
+Tu posición exacta: x=802, y=1.034, z=0.
+
+=== CRIATURAS PERCIBIDAS AHORA ===
+- ACTUAL: el jugador [dx=-2, dy=9, dz=0, distancia=9; actitud=friendly; hostil=no]
+- ACTUAL: Hiram Price [dx=1, dy=-2, dz=0, distancia=2; actitud=friendly; hostil=no; en_las_manos=machete improvisado]
+- ACTUAL: cuervo [dx=19, dy=52, dz=0, distancia=55; actitud=neutral; hostil=no]
+
+=== CASILLAS Y ESTADOS OBSERVABLES AHORA ===
+- ACTUAL [dx=-2, dy=1, dz=0, distancia=2]: terreno=hierba (t_grass); transitable=sí; fuego=false; objetos_visibles={roca[id=rock, tipo=munición, cadaver=false, casquillo=false, arma=true]}
+- ACTUAL [dx=10, dy=4, dz=0, distancia=10]: terreno=hierba (t_grass); transitable=sí; fuego=false; objetos_visibles={piedra grande[id=rock_large, tipo=objeto, cadaver=false, casquillo=false, arma=true]}
+- ACTUAL [dx=12, dy=2, dz=0, distancia=12]: terreno=hierba muerta (t_grass_dead); transitable=sí; fuego=false; objetos_visibles={roca[id=rock, tipo=munición, cadaver=false, casquillo=false, arma=true]}
+- ACTUAL [dx=0, dy=0, dz=0, distancia=0]: terreno=hierba (t_grass); transitable=sí; fuego=false
+
+=== RELACIONES ESPACIALES ENTRE EVIDENCIAS ACTUALES ===
+- RELACION ACTUAL: piedra grande [objeto; id=rock_large; dx=10; dy=4; dz=0] cerca de roca [objeto; id=rock; dx=12; dy=2; dz=0].
+
+=== SEMÁNTICA SENSORIAL OBLIGATORIA ===
+- ACTUAL significa percibido en el estado vivo del juego en esta evaluación.
+- En una casilla ACTUAL, fuego=false significa que no observas fuego activo allí ahora.
+- Una casilla o entidad no observada es DESCONOCIDA, no falsa ni ausente.
+- Los recuerdos son PASADOS y nunca pueden contradecir un dato ACTUAL.
+- Si un recuerdo dice que algo estaba apagado y una casilla ACTUAL dice fuego=true, el estado correcto ahora es encendido.
+
+=== DISPARADOR INTERNO ACTUAL ===
+[EVALUACION INTERNA DE HABLA ESPONTANEA] No es una frase pronunciada por el jugador. Evalua el momento actual, la conversacion reciente, tu memoria y lo que realmente percibes.
+
+ATRIBUTOS ACTUALES:
+fuerza=9
+destreza=6
+inteligencia=6
+percepcion=7
+
+ESTADO FISICO Y EMOCIONAL REAL:
+hambre=0
+sed=0
+somnolencia=17
+dolor=30
+moral=-150
+salud_porcentaje=100
+stamina_porcentaje=88
+frio_intensidad=0
+calor_intensidad=0
+
+ENTORNO REAL:
+ubicacion=campo
+exterior=si
+luz_ambiente=91,1775
+oscuro=no
+clima_id=cloudy
+temperatura=45.8F
+viento_mph=11
+puede_ver_cielo=si
+es_de_noche=no
+fase_lunar=luna nueva
+
+SITUACION:
+combate_o_accion_de_combate=no
+actividad_id=ACT_NULL
+arma_en_manos=bate de béisbol
+
+EVENTO QUE ACTIVO ESTA EVALUACION:
+tipo=LOCATION_CHANGED
+prioridad=65
+detalle=[LOCATION_CHANGED] Entramos o nos desplazamos a: campo
+
+REGLAS DEL EVENTO:
+- dolor es un valor global sin parte del cuerpo: no digas donde te duele.
+- La intensidad debe ser proporcional al valor: dolor<15 es leve, 15-40 moderado, >40 fuerte.
+- No inventes la causa del evento ni detalles que no esten en los datos.
+
+OUTPUT_LANGUAGE=espanol
