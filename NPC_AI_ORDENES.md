@@ -60,6 +60,19 @@ sin seguir ni vigilar: el seguimiento lo devolvería al jugador y un guardia es
 estacionario y no recoge nada); recupera el modo seguir al emprender la vuelta
 o si otra orden cancela la búsqueda.
 
+Distancia de ambas búsquedas: al elegirlas, el menú pregunta hasta dónde
+buscar, y la frase hablada admite el mismo sufijo:
+
+| Opción | Frase | Radio | Sitios máx. |
+|---|---|---|---|
+| Cerca | `... cerca.` | 6 casillas | 30 |
+| Mediano (por defecto) | `... a media distancia.` o sin sufijo | 10 casillas | 40 |
+| Lejos | `... lejos.` | 16 casillas | 80 |
+| Solo dentro de casa | `... dentro de casa.` | el edificio donde está el compañero: casillas con techo alcanzables sin pisar el exterior, hasta 20 | 80 |
+
+Con "dentro de casa" y el compañero en la calle, la orden se rechaza ("Ahora
+mismo no estoy dentro de un edificio").
+
 Recorrido de ambas búsquedas: antes de dar un paso, el compañero examina todo
 lo que puede desde donde está (pilas a la vista y el contenedor que tenga al
 lado) y recoge lo que coincida; solo camina hacia lo que no puede ver desde

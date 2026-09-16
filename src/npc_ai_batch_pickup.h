@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 class npc;
@@ -42,6 +43,29 @@ struct search_food_command_result {
     bool started = false;
     std::string message;
 };
+
+// How far a search order walks.  Chosen from a sub-menu, or spoken as a
+// trailing phrase: "busca comida cerca", "... a media distancia",
+// "... lejos", "... dentro de casa".
+// (Not "near"/"far": windef.h defines those as empty macros.)
+enum class search_range : int {
+    close,     // 6 tiles around the companion
+    medium,    // 10 tiles (the default)
+    distant,   // 16 tiles
+    indoors    // the building the companion stands in, never stepping outside
+};
+
+search_range detect_search_range( const std::string &player_line );
+int search_range_radius( search_range range );
+std::size_t search_range_spot_limit( search_range range );
+// Spoken suffix understood by detect_search_range ("cerca", "lejos"...).
+std::string search_range_phrase( search_range range );
+// Menu label and one-line description with the tile counts, in the
+// dialogue language.
+std::string search_range_label( search_range range );
+std::string search_range_description( search_range range );
+// Pending spots of the companion's active search (tests / diagnostics).
+std::size_t food_search_pending_spots( const npc &who );
 
 bool is_search_food_command( const std::string &player_line );
 

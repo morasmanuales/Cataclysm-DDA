@@ -1349,7 +1349,33 @@ void game::ai_orders_menu()
         target = casualties[casualty_menu.ret]->get_name();
     }
 
-    const std::string player_line = npc_ai::order_menu_phrase( entry.id, target );
+    // 4. How far, for the search orders: near / medium / far / only indoors.
+    std::string range_phrase;
+    if( entry.asks_range ) {
+        uilist range_menu;
+        range_menu.text = npc_ai::localized_ai_message( _( "How far should they search?" ),
+                          "¿Hasta dónde debe buscar?" );
+        range_menu.desc_enabled = true;
+        const std::vector<npc_ai::search_range> ranges = {
+            npc_ai::search_range::close, npc_ai::search_range::medium,
+            npc_ai::search_range::distant, npc_ai::search_range::indoors
+        };
+        const char hotkeys[] = { 'c', 'm', 'l', 'd' };
+        for( std::size_t i = 0; i < ranges.size(); ++i ) {
+            range_menu.addentry_desc( static_cast<int>( i ), true, hotkeys[i],
+                                      npc_ai::search_range_label( ranges[i] ),
+                                      npc_ai::search_range_description( ranges[i] ) );
+        }
+        range_menu.query();
+        if( range_menu.ret < 0 || static_cast<std::size_t>( range_menu.ret ) >= ranges.size() ) {
+            return;
+        }
+        range_phrase = npc_ai::search_range_phrase( ranges[range_menu.ret] );
+    }
+
+    const std::string player_line = entry.asks_range ?
+                                    npc_ai::order_menu_phrase_with_range( entry.id, target, range_phrase ) :
+                                    npc_ai::order_menu_phrase( entry.id, target );
     if( player_line.empty() ) {
         return;
     }

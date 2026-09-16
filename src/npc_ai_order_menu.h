@@ -63,6 +63,9 @@ struct menu_order_entry {
     // the single-companion path, so the menu fans the same phrase out to each
     // companion in turn instead of letting it degrade into group dialogue.
     bool native_group_path;
+    // The order walks a search: the menu asks how far (near / medium / far /
+    // only inside the building) and appends the spoken range to the phrase.
+    bool asks_range;
     int hotkey;
     // Menu text and one-line description, already in the dialogue language.
     std::string label;
@@ -76,6 +79,11 @@ std::optional<menu_order_entry> find_order_menu_entry( menu_order id );
 // Canonical phrase for an order.  `target` is ignored when the entry needs
 // none, and an empty `target` yields an empty phrase when one is required.
 std::string order_menu_phrase( menu_order id, const std::string &target );
+
+// Same, with the spoken range suffix understood by detect_search_range:
+// "Busca comida cerca.", "Busca y trae la linterna dentro de casa."
+std::string order_menu_phrase_with_range( menu_order id, const std::string &target,
+        const std::string &range_phrase );
 
 // Text shown when asking for the target of an order that needs one.
 std::string order_menu_target_prompt( menu_order id );

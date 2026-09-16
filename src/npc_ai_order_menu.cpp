@@ -53,79 +53,92 @@ std::vector<menu_order_entry> order_menu_catalogue()
     catalogue.reserve( 17 );
 
     // Movement
-    catalogue.push_back( { menu_order::follow, G::movement, menu_order_target::none, true, 'f',
+    catalogue.push_back( { menu_order::follow, G::movement, menu_order_target::none, true, false, 'f',
                            text( _( "Follow me" ), "Síganme" ),
                            text( _( "Come with me and do not fall behind." ),
                                  "Vengan conmigo y no se queden atrás." ) } );
-    catalogue.push_back( { menu_order::guard, G::movement, menu_order_target::none, true, 'g',
+    catalogue.push_back( { menu_order::guard, G::movement, menu_order_target::none, true, false, 'g',
                            text( _( "Guard this position" ), "Vigilen esta posición" ),
                            text( _( "Stay here and hold the position." ),
                                  "Quédense aquí y mantengan la posición." ) } );
-    catalogue.push_back( { menu_order::enter_interior, G::movement, menu_order_target::none, true, 'i',
+    catalogue.push_back( { menu_order::enter_interior, G::movement, menu_order_target::none, true, false, 'i',
                            text( _( "Get inside" ), "Entren al edificio" ),
                            text( _( "Take shelter in the nearest reachable safe building and hold there." ),
                                  "Refugiarse en el edificio seguro alcanzable más cercano y quedarse dentro." ) } );
-    catalogue.push_back( { menu_order::drag_casualty, G::movement, menu_order_target::ally_name, true, 'a',
+    catalogue.push_back( { menu_order::drag_casualty, G::movement, menu_order_target::ally_name, true, false, 'a',
                            text( _( "Drag a casualty…" ), "Arrastrar a un herido…" ),
                            text( _( "Choose the injured companion; you then pick where to drag them." ),
                                  "Elige al compañero herido; después señalas adónde arrastrarlo." ) } );
 
     // Items
-    catalogue.push_back( { menu_order::pickup, G::items, menu_order_target::item_words, true, 'p',
+    catalogue.push_back( { menu_order::pickup, G::items, menu_order_target::item_words, true, false, 'p',
                            text( _( "Pick up an item…" ), "Recoger un objeto…" ),
                            text( _( "Name an object lying nearby.  Instant when exactly one visible item matches; otherwise the AI model picks among the real candidates." ),
                                  "Nombra un objeto cercano.  Inmediato si un solo objeto visible coincide; si no, el modelo de IA elige entre los candidatos reales." ) } );
-    catalogue.push_back( { menu_order::pickup_all_food, G::items, menu_order_target::none, false, 'F',
+    catalogue.push_back( { menu_order::pickup_all_food, G::items, menu_order_target::none, false, false, 'F',
                            text( _( "Pick up all the food" ), "Recoger toda la comida" ),
                            text( _( "Collect every edible item in sight, in batches." ),
                                  "Recoger por lotes toda la comida a la vista." ) } );
-    catalogue.push_back( { menu_order::search_food, G::items, menu_order_target::none, false, 'b',
+    catalogue.push_back( { menu_order::search_food, G::items, menu_order_target::none, false, true, 'b',
                            text( _( "Search for food" ), "Buscar comida" ),
                            text( _( "Walk the surroundings checking piles, fridges, cupboards and shelves within a short radius, and pick up the food found." ),
                                  "Recorrer los alrededores revisando pilas, neveras, armarios y estantes en un radio corto, y recoger la comida que encuentre." ) } );
-    catalogue.push_back( { menu_order::search_item, G::items, menu_order_target::item_words, false, 'B',
+    catalogue.push_back( { menu_order::search_item, G::items, menu_order_target::item_words, false, true, 'B',
                            text( _( "Search for an item…" ), "Buscar un objeto…" ),
                            text( _( "Name it; the companion walks the surroundings checking piles and containers, brings back every match and reports what it found." ),
                                  "Nómbralo; el compañero recorre los alrededores revisando pilas y contenedores, trae todo lo que coincida e informa de lo encontrado." ) } );
-    catalogue.push_back( { menu_order::wield, G::items, menu_order_target::item_words, false, 'w',
+    catalogue.push_back( { menu_order::wield, G::items, menu_order_target::item_words, false, false, 'w',
                            text( _( "Wield an item…" ), "Empuñar un objeto…" ),
                            text( _( "Name a weapon or tool the companion carries or sees.  Instant with one candidate; the AI model decides when there are several." ),
                                  "Nombra un arma o herramienta que lleve o vea.  Inmediato con un candidato; con varios decide el modelo de IA." ) } );
-    catalogue.push_back( { menu_order::drop, G::items, menu_order_target::item_words, true, 'd',
+    catalogue.push_back( { menu_order::drop, G::items, menu_order_target::item_words, true, false, 'd',
                            text( _( "Drop an item…" ), "Soltar un objeto…" ),
                            text( _( "Name something the companion carries." ),
                                  "Nombra algo que el compañero lleve encima." ) } );
-    catalogue.push_back( { menu_order::wear, G::items, menu_order_target::item_words, true, 'e',
+    catalogue.push_back( { menu_order::wear, G::items, menu_order_target::item_words, true, false, 'e',
                            text( _( "Wear an item…" ), "Ponerse una prenda…" ),
                            text( _( "Name clothing, a backpack or gear to put on." ),
                                  "Nombra una prenda, mochila o equipo para ponerse." ) } );
-    catalogue.push_back( { menu_order::take_off, G::items, menu_order_target::item_words, true, 't',
+    catalogue.push_back( { menu_order::take_off, G::items, menu_order_target::item_words, true, false, 't',
                            text( _( "Take off an item…" ), "Quitarse una prenda…" ),
                            text( _( "Name a worn item to remove." ),
                                  "Nombra una prenda puesta para quitársela." ) } );
-    catalogue.push_back( { menu_order::store, G::items, menu_order_target::item_words, true, 's',
+    catalogue.push_back( { menu_order::store, G::items, menu_order_target::item_words, true, false, 's',
                            text( _( "Put away an item…" ), "Guardar un objeto…" ),
                            text( _( "Name the wielded item to holster or stow." ),
                                  "Nombra el objeto empuñado para enfundarlo o guardarlo." ) } );
-    catalogue.push_back( { menu_order::recover, G::items, menu_order_target::item_words, true, 'r',
+    catalogue.push_back( { menu_order::recover, G::items, menu_order_target::item_words, true, false, 'r',
                            text( _( "Recover lost gear…" ), "Recuperar equipo perdido…" ),
                            text( _( "Say \"backpack\", \"weapon\" or \"helmet\"; the companion retrieves the one it dropped." ),
                                  "Di \"mochila\", \"arma\" o \"casco\"; el compañero recupera el que dejó caer." ) } );
 
     // Tasks
-    catalogue.push_back( { menu_order::start_fire, G::tasks, menu_order_target::none, false, 'l',
+    catalogue.push_back( { menu_order::start_fire, G::tasks, menu_order_target::none, false, false, 'l',
                            text( _( "Light a fire" ), "Encender fuego" ),
                            text( _( "Light the stove or fireplace in sight." ),
                                  "Encender la cocina o chimenea a la vista." ) } );
-    catalogue.push_back( { menu_order::unload_vehicle, G::tasks, menu_order_target::none, false, 'u',
+    catalogue.push_back( { menu_order::unload_vehicle, G::tasks, menu_order_target::none, false, false, 'u',
                            text( _( "Unload the vehicle" ), "Descargar el vehículo" ),
                            text( _( "Carry the cargo out of the vehicle in sight." ),
                                  "Sacar la carga del vehículo a la vista." ) } );
-    catalogue.push_back( { menu_order::watch, G::tasks, menu_order_target::item_words, false, 'v',
+    catalogue.push_back( { menu_order::watch, G::tasks, menu_order_target::item_words, false, false, 'v',
                            text( _( "Watch for an item…" ), "Vigilar un objeto…" ),
                            text( _( "The companion warns you, in magenta, when it sees the named object.  Matches by word against item names and ids, with the synonyms in data/npc_ai/watch_synonyms.txt; no AI model." ),
                                  "El compañero avisa, en magenta, cuando vea el objeto nombrado.  Casa por palabra con nombres e ids, con los sinónimos de data/npc_ai/watch_synonyms.txt; sin modelo de IA." ) } );
     return catalogue;
+}
+
+std::string order_menu_phrase_with_range( const menu_order id, const std::string &target,
+        const std::string &range_phrase )
+{
+    std::string phrase = order_menu_phrase( id, target );
+    if( phrase.empty() || range_phrase.empty() ) {
+        return phrase;
+    }
+    if( !phrase.empty() && phrase.back() == '.' ) {
+        phrase.pop_back();
+    }
+    return phrase + " " + range_phrase + ".";
 }
 
 std::optional<menu_order_entry> find_order_menu_entry( const menu_order id )

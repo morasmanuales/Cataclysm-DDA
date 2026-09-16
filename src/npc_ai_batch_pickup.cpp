@@ -36,6 +36,12 @@
 
 namespace
 {
+// The search range type and helpers are declared in npc_ai (header).
+using npc_ai::search_range;
+using npc_ai::search_range_radius;
+using npc_ai::search_range_spot_limit;
+using npc_ai::search_range_phrase;
+
 
 
 constexpr int batch_room_radius = 8;
@@ -1469,12 +1475,21 @@ void finish_batch(
 // CDDA-AI FOOD SEARCH ("busca comida")
 // ============================================================
 
-constexpr int food_search_radius = 10;
-constexpr std::size_t food_search_spot_limit = 40;
+// Radii and spot caps per search range; see search_range in the header.
+constexpr int food_search_radius_near = 6;
+constexpr int food_search_radius_medium = 10;
+constexpr int food_search_radius_far = 16;
+constexpr int food_search_radius_indoors = 20;
+constexpr std::size_t food_search_spot_limit_near = 30;
+constexpr std::size_t food_search_spot_limit_medium = 40;
+constexpr std::size_t food_search_spot_limit_far = 80;
+constexpr std::size_t food_search_spot_limit_indoors = 80;
+constexpr std::size_t indoor_flood_tile_limit = 1200;
 constexpr int food_search_stuck_limit = 30;
 
 struct food_search_state {
     bool active = false;
+    search_range range = search_range::medium;
     // false: any food.  true: items matching query_words.
     bool named = false;
     std::string query_display;
@@ -1868,9 +1883,60 @@ npc_ai::search_food_command_result begin_search( npc &who, food_search_state sta
 
     map &here = get_map();
     const tripoint_bub_ms origin = who.pos_bub( here );
+    const int radius = search_range_radius( state.range );
+    const std::size_t spot_limit = search_range_spot_limit( state.range );
+
+    // "Solo dentro de casa": the reachable roofed tiles around the companion,
+    // flooding through doors but never onto an outside tile.  Spots must be
+    // in that set or right next to it (containers are impassable).
+    std::set<tripoint_bub_ms> indoor_tiles;
+    if( state.range == search_range::indoors ) {
+        if( here.is_outside( origin ) ) {
+            result.message = npc_ai::localized_ai_message(
+                                 _( "I'm not inside a building right now." ),
+                                 "Ahora mismo no estoy dentro de un edificio." );
+            debug_line( "RESULT=NOT_INDOORS" );
+            return result;
+        }
+        std::deque<tripoint_bub_ms> frontier;
+        indoor_tiles.insert( origin );
+        frontier.push_back( origin );
+        while( !frontier.empty() && indoor_tiles.size() < indoor_flood_tile_limit ) {
+            const tripoint_bub_ms current = frontier.front();
+            frontier.pop_front();
+            for( const tripoint_bub_ms &next : here.points_in_radius( current, 1, 0 ) ) {
+                if( next == current || indoor_tiles.count( next ) != 0 ||
+                    rl_dist( origin, next ) > radius || here.is_outside( next ) ||
+                    !here.passable( next ) ) {
+                    continue;
+                }
+                indoor_tiles.insert( next );
+                frontier.push_back( next );
+            }
+        }
+        debug_line( "INDOOR_TILES=" + std::to_string( indoor_tiles.size() ) );
+    }
+    const auto indoors_ok = [&]( const tripoint_bub_ms & p ) {
+        if( state.range != search_range::indoors ) {
+            return true;
+        }
+        if( here.is_outside( p ) ) {
+            return false;
+        }
+        if( indoor_tiles.count( p ) != 0 ) {
+            return true;
+        }
+        for( const tripoint_bub_ms &neighbour : here.points_in_radius( p, 1, 0 ) ) {
+            if( indoor_tiles.count( neighbour ) != 0 ) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     std::vector<tripoint_bub_ms> spots;
-    for( const tripoint_bub_ms &p : here.points_in_radius( origin, food_search_radius, 0 ) ) {
-        if( p == origin || !tile_is_food_spot( here, p ) ) {
+    for( const tripoint_bub_ms &p : here.points_in_radius( origin, radius, 0 ) ) {
+        if( p == origin || !tile_is_food_spot( here, p ) || !indoors_ok( p ) ) {
             continue;
         }
         spots.push_back( p );
@@ -1881,10 +1947,11 @@ npc_ai::search_food_command_result begin_search( npc &who, food_search_state sta
     const tripoint_bub_ms &rhs ) {
         return rl_dist( origin, lhs ) < rl_dist( origin, rhs );
     } );
-    if( spots.size() > food_search_spot_limit ) {
-        spots.resize( food_search_spot_limit );
+    if( spots.size() > spot_limit ) {
+        spots.resize( spot_limit );
     }
-    debug_line( "SEARCH_SPOTS=" + std::to_string( spots.size() ) );
+    debug_line( "SEARCH_RANGE=" + search_range_phrase( state.range ) + " | radius=" +
+                std::to_string( radius ) + " | SEARCH_SPOTS=" + std::to_string( spots.size() ) );
     if( spots.empty() ) {
         result.message = npc_ai::localized_ai_message(
                              _( "There is nowhere nearby worth checking." ),
@@ -2245,6 +2312,7 @@ search_food_command_result try_handle_search_food_command( npc &who,
     debug_line( "INTENT=FOOD_SEARCH" );
     food_search_state state;
     state.named = false;
+    state.range = detect_search_range( player_line );
     return begin_search( who, state, npc_ai::localized_ai_message(
                              _( "Alright, I'll check around here for food." ),
                              "Vale, voy a revisar los alrededores en busca de comida." ) );
@@ -2286,7 +2354,20 @@ std::string parse_search_item_request( const std::string &player_line )
     for( const std::string &prefix : prefixes ) {
         if( normalized.compare( 0, prefix.size(), prefix ) == 0 &&
             normalized.size() > prefix.size() ) {
-            return normalized.substr( prefix.size() );
+            std::string request = normalized.substr( prefix.size() );
+            // A trailing range phrase belongs to the order, not to the object.
+            static const std::vector<std::string> range_suffixes = {
+                " solo dentro de casa", " dentro de casa", " dentro del edificio", " solo dentro",
+                " a media distancia", " por la zona", " cerca", " lejos"
+            };
+            for( const std::string &suffix : range_suffixes ) {
+                if( request.size() > suffix.size() &&
+                    request.compare( request.size() - suffix.size(), suffix.size(), suffix ) == 0 ) {
+                    request.erase( request.size() - suffix.size() );
+                    break;
+                }
+            }
+            return request;
         }
     }
     return std::string();
@@ -2312,6 +2393,7 @@ search_food_command_result try_handle_search_item_command( npc &who,
     }
     food_search_state state;
     state.named = true;
+    state.range = detect_search_range( player_line );
     state.query_words = words;
     std::string display;
     for( const std::string &word : words ) {
@@ -2419,6 +2501,119 @@ bool process_food_search( npc &who )
     // Nothing to take here; checking takes a moment.
     who.mod_moves( -who.get_speed() );
     return true;
+}
+
+search_range detect_search_range( const std::string &player_line )
+{
+    const std::string line = " " + normalize_search_text( player_line ) + " ";
+    const auto has = [&]( const char *needle ) {
+        return line.find( needle ) != std::string::npos;
+    };
+    if( has( " dentro de casa " ) || has( " dentro del edificio " ) || has( " solo dentro " ) ||
+        has( " sin salir " ) || has( " indoors " ) || has( " inside the building " ) ) {
+        return search_range::indoors;
+    }
+    if( has( " lejos " ) || has( " far " ) || has( " far away " ) ) {
+        return search_range::distant;
+    }
+    if( has( " cerca " ) || has( " cerquita " ) || has( " nearby " ) || has( " close by " ) ) {
+        return search_range::close;
+    }
+    return search_range::medium;
+}
+
+int search_range_radius( const search_range range )
+{
+    switch( range ) {
+        case search_range::close:
+            return food_search_radius_near;
+        case search_range::medium:
+            return food_search_radius_medium;
+        case search_range::distant:
+            return food_search_radius_far;
+        case search_range::indoors:
+            return food_search_radius_indoors;
+    }
+    return food_search_radius_medium;
+}
+
+std::size_t search_range_spot_limit( const search_range range )
+{
+    switch( range ) {
+        case search_range::close:
+            return food_search_spot_limit_near;
+        case search_range::medium:
+            return food_search_spot_limit_medium;
+        case search_range::distant:
+            return food_search_spot_limit_far;
+        case search_range::indoors:
+            return food_search_spot_limit_indoors;
+    }
+    return food_search_spot_limit_medium;
+}
+
+std::string search_range_phrase( const search_range range )
+{
+    switch( range ) {
+        case search_range::close:
+            return "cerca";
+        case search_range::medium:
+            return "a media distancia";
+        case search_range::distant:
+            return "lejos";
+        case search_range::indoors:
+            return "dentro de casa";
+    }
+    return "a media distancia";
+}
+
+std::string search_range_label( const search_range range )
+{
+    switch( range ) {
+        case search_range::close:
+            return npc_ai::localized_ai_message( _( "Nearby" ), "Cerca" );
+        case search_range::medium:
+            return npc_ai::localized_ai_message( _( "Medium" ), "Mediano" );
+        case search_range::distant:
+            return npc_ai::localized_ai_message( _( "Far" ), "Lejos" );
+        case search_range::indoors:
+            return npc_ai::localized_ai_message( _( "Only inside the building" ),
+                                                 "Solo dentro de casa" );
+    }
+    return std::string();
+}
+
+std::string search_range_description( const search_range range )
+{
+    switch( range ) {
+        case search_range::close:
+            return string_format( npc_ai::localized_ai_message(
+                                      _( "Checks up to %d tiles around the companion.  Quick, stays close to you." ),
+                                      "Revisa hasta %d casillas alrededor del compañero.  Rápido, se queda cerca de ti." ),
+                                  food_search_radius_near );
+        case search_range::medium:
+            return string_format( npc_ai::localized_ai_message(
+                                      _( "Checks up to %d tiles around the companion.  A house and its yard." ),
+                                      "Revisa hasta %d casillas alrededor del compañero.  Una casa y su patio." ),
+                                  food_search_radius_medium );
+        case search_range::distant:
+            return string_format( npc_ai::localized_ai_message(
+                                      _( "Checks up to %d tiles around the companion.  Several buildings; a long walk." ),
+                                      "Revisa hasta %d casillas alrededor del compañero.  Varios edificios; un paseo largo." ),
+                                  food_search_radius_far );
+        case search_range::indoors:
+            return string_format( npc_ai::localized_ai_message(
+                                      _( "Only the building the companion is standing in, through its doors but never outside (up to %d tiles)." ),
+                                      "Solo el edificio donde está el compañero, pasando por sus puertas pero sin salir fuera (hasta %d casillas)." ),
+                                  food_search_radius_indoors );
+    }
+    return std::string();
+}
+
+std::size_t food_search_pending_spots( const npc &who )
+{
+    const auto found = food_searches.find( npc_key( who ) );
+    return found == food_searches.end() ? 0 : found->second.spots.size();
 }
 
 bool has_food_search( const npc &who )

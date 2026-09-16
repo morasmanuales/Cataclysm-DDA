@@ -486,3 +486,101 @@ TEST_CASE( "cancelled_search_restores_following", "[npc_ai][npc_ai_orders][npc_a
     CHECK( who.mission == NPC_MISSION_GUARD_ALLY );
     CHECK_FALSE( who.is_following() );
 }
+
+TEST_CASE( "search_range_is_read_from_the_phrase", "[npc_ai][npc_ai_orders][npc_ai_food_search]" )
+{
+    using npc_ai::search_range;
+    using npc_ai::detect_search_range;
+    CHECK( detect_search_range( "Busca comida." ) == search_range::medium );
+    CHECK( detect_search_range( "Busca comida cerca." ) == search_range::close );
+    CHECK( detect_search_range( "Busca comida a media distancia." ) == search_range::medium );
+    CHECK( detect_search_range( "Busca comida lejos." ) == search_range::distant );
+    CHECK( detect_search_range( "Busca comida dentro de casa." ) == search_range::indoors );
+    CHECK( detect_search_range( "Busca y trae la linterna lejos." ) == search_range::distant );
+    // The range phrase never leaks into the object words.
+    CHECK( npc_ai::parse_search_item_request( "Busca y trae la linterna lejos." ) == "la linterna" );
+    CHECK( npc_ai::parse_search_item_request( "Busca y trae la linterna dentro de casa." ) ==
+           "la linterna" );
+    // Menu phrases round-trip.
+    for( const search_range range : { search_range::close, search_range::medium,
+                                      search_range::distant, search_range::indoors } ) {
+        const std::string food = npc_ai::order_menu_phrase_with_range(
+                                     npc_ai::menu_order::search_food, "", npc_ai::search_range_phrase( range ) );
+        CHECK( detect_search_range( food ) == range );
+        CHECK( npc_ai::is_search_food_command( food ) );
+        const std::string thing = npc_ai::order_menu_phrase_with_range(
+                                      npc_ai::menu_order::search_item, "la radio", npc_ai::search_range_phrase( range ) );
+        CHECK( detect_search_range( thing ) == range );
+        CHECK( npc_ai::parse_search_item_request( thing ) == "la radio" );
+        CHECK( !npc_ai::search_range_label( range ).empty() );
+        CHECK( npc_ai::search_range_description( range ).find(
+                   std::to_string( npc_ai::search_range_radius( range ) ) ) != std::string::npos );
+    }
+    CHECK( npc_ai::search_range_radius( search_range::close ) < npc_ai::search_range_radius( search_range::medium ) );
+    CHECK( npc_ai::search_range_radius( search_range::medium ) < npc_ai::search_range_radius( search_range::distant ) );
+}
+
+TEST_CASE( "search_range_limits_which_spots_are_collected",
+           "[npc_ai][npc_ai_orders][npc_ai_food_search]" )
+{
+    npc &who = prepare_menu_follower();
+    npc_ai::reset_all_food_batches();
+    map &here = get_map();
+    clear_items( 0 );
+    const tripoint_bub_ms origin = who.pos_bub( here );
+    // Food at 4, 8 and 14 tiles.
+    here.add_item_or_charges( origin + tripoint_rel_ms{ 4, 0, 0 }, item( itype_can_beans, calendar::turn ) );
+    here.add_item_or_charges( origin + tripoint_rel_ms{ 8, 0, 0 }, item( itype_can_beans, calendar::turn ) );
+    here.add_item_or_charges( origin + tripoint_rel_ms{ 0, 14, 0 }, item( itype_can_beans, calendar::turn ) );
+
+    REQUIRE( npc_ai::try_handle_search_food_command( who, "Busca comida cerca." ).started );
+    CHECK( npc_ai::food_search_pending_spots( who ) == 1 );
+    npc_ai::cancel_food_search( who );
+
+    REQUIRE( npc_ai::try_handle_search_food_command( who, "Busca comida." ).started );
+    CHECK( npc_ai::food_search_pending_spots( who ) == 2 );
+    npc_ai::cancel_food_search( who );
+
+    REQUIRE( npc_ai::try_handle_search_food_command( who, "Busca comida lejos." ).started );
+    CHECK( npc_ai::food_search_pending_spots( who ) == 3 );
+    npc_ai::cancel_food_search( who );
+}
+
+TEST_CASE( "indoor_search_never_leaves_the_building", "[npc_ai][npc_ai_orders][npc_ai_food_search]" )
+{
+    npc &who = prepare_menu_follower();
+    npc_ai::reset_all_food_batches();
+    map &here = get_map();
+    clear_items( 0 );
+
+    // Outside: the order is refused.
+    const npc_ai::search_food_command_result outside =
+        npc_ai::try_handle_search_food_command( who, "Busca comida dentro de casa." );
+    REQUIRE( outside.handled );
+    CHECK_FALSE( outside.started );
+    CHECK_FALSE( npc_ai::has_food_search( who ) );
+
+    // A roofed 7x7 room; the companion stands inside.
+    const tripoint_bub_ms anchor{ 70, 60, 0 };
+    for( const tripoint_bub_ms &tile : here.points_in_radius( anchor, 3, 0 ) ) {
+        here.ter_set( tile, ter_str_id( "t_floor" ) );
+        here.ter_set( tile + tripoint::above, ter_str_id( "t_flat_roof" ) );
+    }
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0, true );
+    who.setpos( here, anchor );
+    REQUIRE_FALSE( here.is_outside( anchor ) );
+    // Food inside the room and food outside, both within radius.
+    here.add_item_or_charges( anchor + tripoint_rel_ms{ 2, 0, 0 }, item( itype_can_beans, calendar::turn ) );
+    here.add_item_or_charges( anchor + tripoint_rel_ms{ 6, 0, 0 }, item( itype_can_beans, calendar::turn ) );
+    REQUIRE( here.is_outside( anchor + tripoint_rel_ms{ 6, 0, 0 } ) );
+
+    REQUIRE( npc_ai::try_handle_search_food_command( who, "Busca comida dentro de casa." ).started );
+    CHECK( npc_ai::food_search_pending_spots( who ) == 1 );
+    npc_ai::cancel_food_search( who );
+
+    // The same room, without the restriction, reaches both.
+    REQUIRE( npc_ai::try_handle_search_food_command( who, "Busca comida." ).started );
+    CHECK( npc_ai::food_search_pending_spots( who ) == 2 );
+    npc_ai::cancel_food_search( who );
+}
