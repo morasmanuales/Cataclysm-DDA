@@ -6,6 +6,7 @@
 #include "cata_utility.h"
 #include "npc.h"
 #include "npc_ai_batch_pickup.h"
+#include "npc_ai_hide.h"
 #include "npc_ai_interior.h"
 #include "npctalk.h"
 
@@ -117,6 +118,8 @@ tactical_order_result execute_tactical_order( const std::vector<npc *> &targets,
         // companion never turns into a guard later by surprise.
         clear_interior_hold( *target );
         cancel_food_search( *target );
+        // A hidden companion gets its combat rules back with the new order.
+        cancel_hide( *target );
         if( result.order == tactical_order::guard ) {
             talk_function::assign_guard( *target );
         } else {

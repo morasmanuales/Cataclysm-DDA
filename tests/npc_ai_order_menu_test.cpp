@@ -19,6 +19,7 @@
 #include "npc_ai_context.h"
 #include "npc_ai_equipment.h"
 #include "npc_ai_fire.h"
+#include "npc_ai_hide.h"
 #include "npc_ai_interior.h"
 #include "npc_ai_order_menu.h"
 #include "npc_ai_rescue.h"
@@ -59,7 +60,7 @@ npc &prepare_menu_follower()
 TEST_CASE( "order_menu_catalogue_is_closed_and_well_formed", "[npc_ai][npc_ai_orders]" )
 {
     const std::vector<npc_ai::menu_order_entry> catalogue = npc_ai::order_menu_catalogue();
-    REQUIRE( catalogue.size() == 17 );
+    REQUIRE( catalogue.size() == 18 );
 
     std::set<int> hotkeys;
     std::set<int> ids;
@@ -118,6 +119,12 @@ TEST_CASE( "order_menu_phrases_hit_the_deterministic_fast_path", "[npc_ai][npc_a
 
     CHECK( npc_ai::parse_structured_voice_order( order_menu_phrase( menu_order::enter_interior, "" ) )
            == npc_ai::structured_voice_order::enter_nearest_reachable_safe_interior );
+    CHECK( npc_ai::parse_hide_order( order_menu_phrase( menu_order::hide, "" ) ) );
+    // The hide phrase is not mistaken for the interior order or a tactical one.
+    CHECK( npc_ai::parse_structured_voice_order( order_menu_phrase( menu_order::hide, "" ) ) ==
+           npc_ai::structured_voice_order::none );
+    CHECK( npc_ai::parse_tactical_order( order_menu_phrase( menu_order::hide, "" ) ) ==
+           npc_ai::tactical_order::none );
 
     CHECK( npc_ai::parse_rescue_order( order_menu_phrase( menu_order::drag_casualty, "Liam" ) ) );
 

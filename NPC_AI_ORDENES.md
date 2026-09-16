@@ -50,6 +50,7 @@ Objetos y Tareas con cabeceras. Las órdenes que C++ ya sabe ejecutar:
 | Síganme | `Vengan conmigo.` | uno o todos |
 | Vigilen esta posición | `Quedense aqui.` | uno o todos |
 | Entren al edificio | `Todos adentro.` (al llegar dejan de seguirte y vigilan esa casilla; "Síganme" los recupera) | uno o todos |
+| Esconderse | `Escondanse.` (cada compañero va a SU habitación cerrada más cercana: muros, ventanas cerradas y al menos una puerta; dentro elige una casilla a cubierto de las puertas (mostrador, mesa o esquina entre ella y la puerta) y, si no hay, la más lejos de las puertas; cierra la puerta al pasar y al llegar; deja de atacar, ignora ruidos, se tumba (tumbado tras un mueble con cobertura mayor que 33 nadie lo ve; de pie sí) y vigila esa casilla. Se levanta para reubicarse, para defenderse y al cancelar. Elige la casilla a cubierto tanto de las puertas como de las ventanas intactas. Si un enemigo entra en la habitación a distancia, busca otra habitación cerrada (5 turnos de enfriamiento entre saltos); si no queda ninguna, o si el enemigo ya está pegado a él (también de camino al escondite), se levanta y se defiende donde está; tras 10 turnos sin enemigos a la vista vuelve a esconderse, o retoma la marcha si aún no había llegado. Mientras está escondido sin nadie en la habitación se le quita el pánico vanilla (`npc_run_away`), así lo que vea por la ventana no lo saca del escondite. Sin ninguna habitación cerrada alcanzable: "No encuentro dónde encerrarme, me escondo aquí" y usa la casilla interior más lejos de los enemigos a la vista. Reglas forzadas mientras dura: no enfrentar, cerrar puertas, ignorar ruidos, solo armas silenciosas, y se le permite abrir puertas aunque el jugador lo tuviera prohibido (lo avisa). Se reafirman cada turno, así "Relajarse (limpiar anulaciones)" no lo deja peleando sin querer; al terminar se restauran exactamente las anulaciones que tenía antes, incluidas las de "Prepararse para el peligro". "Síganme" o "Quédense aquí" terminan el escondite; sin modelo) | uno o todos |
 | Recoger un objeto… | `Recoge <objeto>.` | uno o todos |
 | Recoger toda la comida | `Recoge toda la comida.` | uno o todos (uno por uno) |
 | Buscar comida | `Busca comida.` (recorre un radio de 10 casillas, atravesando puertas, revisa pilas y contenedores no sellados como neveras, armarios y estantes, y recoge la comida que encuentra; sin modelo; al terminar informa de sitios revisados y de lo recogido por nombre y cantidad) | uno o todos (uno por uno) |
@@ -170,6 +171,17 @@ cola compartida `begin_directed_pickup` para ambas rutas) y
   clasificador estricto (es/en).
 - `src/npc_ai_tactical.*`: `execute_tactical_order` acepta la orden ya
   clasificada; listas de seguir y vigilar ampliadas.
+- `src/npc_ai_hide.*`: orden "Escondanse": búsqueda de habitación cerrada
+  (inundación sin cruzar puertas; fuga hacia fuera = no cerrada), anulaciones
+  temporales de `forbid_engage`, `close_doors` e `ignore_noise` (solo las que
+  el jugador no tenía forzadas), llegada como puesto de guardia, reubicación al
+  ser descubierto y defensa propia cuando no hay otro escondite. Enganches en
+  `npcmove.cpp` (`process_hide` por turno), `npctalk.cpp` (despacho) y
+  `npc_ai_tactical.cpp` (`cancel_hide`).
+- `tests/npc_ai_hide_test.cpp`: parser, habitación cerrada frente a techo sin
+  muros, casilla más profunda, cierre de puerta al llegar, reubicación,
+  acorralado y vuelta a la calma, grupo con casillas distintas, anulaciones
+  propias del jugador intactas.
 - `src/npctalk.cpp`: enganche antes del diálogo individual y del grupal.
 - `tests/npc_ai_order_intent_test.cpp`: puerta, parser, ejecución con
   ejecutor falso (FOLLOW cambia la misión del NPC; NONE y salidas inválidas

@@ -11,7 +11,7 @@ namespace npc_ai
 
 // Closed catalogue of companion orders that the game can execute without the
 // model deciding anything.  Every entry maps to a canonical spoken phrase that
-// the existing keyword parsers (npc_ai_tactical, npc_ai_interior,
+// the existing keyword parsers (npc_ai_tactical, npc_ai_interior, npc_ai_hide,
 // npc_ai_pickup, npc_ai_wield, npc_ai_equipment, npc_ai_rescue, npc_ai_fire,
 // npc_ai_vehicle_unload, npc_ai_batch_pickup, npc_ai_action_parser) already
 // recognise, so picking an entry from the menu is exactly the same as typing
@@ -20,6 +20,7 @@ enum class menu_order : int {
     follow,
     guard,
     enter_interior,
+    hide,
     pickup,
     pickup_all_food,
     search_food,

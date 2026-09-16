@@ -50,7 +50,7 @@ std::vector<menu_order_entry> order_menu_catalogue()
 {
     using G = menu_order_group;
     std::vector<menu_order_entry> catalogue;
-    catalogue.reserve( 17 );
+    catalogue.reserve( 18 );
 
     // Movement
     catalogue.push_back( { menu_order::follow, G::movement, menu_order_target::none, true, false, 'f',
@@ -65,6 +65,10 @@ std::vector<menu_order_entry> order_menu_catalogue()
                            text( _( "Get inside" ), "Entren al edificio" ),
                            text( _( "Take shelter in the nearest reachable safe building and hold there." ),
                                  "Refugiarse en el edificio seguro alcanzable más cercano y quedarse dentro." ) } );
+    catalogue.push_back( { menu_order::hide, G::movement, menu_order_target::none, true, false, 'h',
+                           text( _( "Hide" ), "Esconderse" ),
+                           text( _( "Each companion goes to its nearest enclosed room (walls, closed windows, a door), shuts the door, stops fighting and holds there.  If an enemy gets in it moves to another hideout; with none left it defends itself.  \"Follow me\" releases them." ),
+                                 "Cada compañero va a la habitación cerrada más cercana (muros, ventanas cerradas y puerta), cierra la puerta, deja de atacar y se queda allí.  Si un enemigo entra busca otro escondite; si no queda ninguno, se defiende.  \"Síganme\" los recupera." ) } );
     catalogue.push_back( { menu_order::drag_casualty, G::movement, menu_order_target::ally_name, true, false, 'a',
                            text( _( "Drag a casualty…" ), "Arrastrar a un herido…" ),
                            text( _( "Choose the injured companion; you then pick where to drag them." ),
@@ -164,6 +168,8 @@ std::string order_menu_phrase( const menu_order id, const std::string &raw_targe
             return "Quedense aqui.";
         case menu_order::enter_interior:
             return "Todos adentro.";
+        case menu_order::hide:
+            return "Escondanse.";
         case menu_order::pickup_all_food:
             return "Recoge toda la comida.";
         case menu_order::search_food:
@@ -223,6 +229,7 @@ std::string order_menu_target_prompt( const menu_order id )
         case menu_order::follow:
         case menu_order::guard:
         case menu_order::enter_interior:
+        case menu_order::hide:
         case menu_order::pickup_all_food:
         case menu_order::search_food:
         case menu_order::start_fire:

@@ -101,6 +101,7 @@
 #include "npc_ai_async.h"
 #include "npc_ai_context.h"
 #include "npc_ai_memory.h"
+#include "npc_ai_hide.h"
 #include "npc_ai_interior.h"
 #include "npc_ai_rescue.h"
 #include "npc_ai_tactical.h"
@@ -1506,6 +1507,18 @@ void game::ai_dispatch_player_line( const npc_ai::ai_conversation_selection &sel
                        "DIRECT_PLAYER_DIALOGUE" );
     };
 
+    if( npc_ai::parse_hide_order( player_line ) ) {
+        const npc_ai::hide_order_result hide = npc_ai::execute_hide_order( selection.targets );
+        log_command_intercept( "HIDE", hide.success ? "ACCEPTED" : "REJECTED" );
+        if( hide.success ) {
+            guy->say( hide.message );
+            npc_ai::remember_exchange( *guy, player_line, hide.message );
+        } else {
+            add_msg( m_info, hide.message );
+        }
+        return;
+    }
+
     if( npc_ai::parse_structured_voice_order( player_line ) ==
         npc_ai::structured_voice_order::enter_nearest_reachable_safe_interior ) {
         const npc_ai::interior_order_result interior =
@@ -2000,8 +2013,14 @@ void game::chat()
 
                 return;
             }
-            if( npc_ai::parse_structured_voice_order( yell_msg ) ==
-                npc_ai::structured_voice_order::enter_nearest_reachable_safe_interior ) {
+            if( npc_ai::parse_hide_order( yell_msg ) ) {
+                const npc_ai::hide_order_result hide = npc_ai::execute_hide_order( followers );
+                if( !hide.success ) {
+                    add_msg( m_info, hide.message );
+                }
+                is_order = true;
+            } else if( npc_ai::parse_structured_voice_order( yell_msg ) ==
+                       npc_ai::structured_voice_order::enter_nearest_reachable_safe_interior ) {
                 const npc_ai::interior_order_result interior =
                     npc_ai::execute_enter_nearest_reachable_safe_interior( followers );
                 if( !interior.success ) {

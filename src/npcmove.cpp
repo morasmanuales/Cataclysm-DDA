@@ -85,6 +85,7 @@
 #include "npc_ai_context.h"
 #include "npc_ai_equipment_memory.h"
 #include "npc_ai_fire.h"
+#include "npc_ai_hide.h"
 #include "npc_ai_interior.h"
 #include "npc_ai_profiler.h"
 #include "npc_ai_rescue.h"
@@ -1416,6 +1417,9 @@ void npc::move()
         if( !has_rescue_claim && npc_ai::process_food_search( *this ) ) {
             return;
         }
+        // "Escondanse": arrival at the hideout, threat check and relocation.
+        // Never consumes the turn; the guard post and the walk do the rest.
+        npc_ai::process_hide( *this );
         // Vehicle unloading remains a deterministic goal; ACT_MOVE_LOOT performs the hauling.
         if( !has_rescue_claim && npc_ai::process_vehicle_unload_task( *this ) ) {
             return;

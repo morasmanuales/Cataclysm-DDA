@@ -26,6 +26,7 @@
 #include "pathfinding.h"
 #include "npc_ai_context.h"
 #include "npc_ai_debug.h"
+#include "npc_ai_hide.h"
 #include "npctalk.h"
 #include "output.h"
 #include "point.h"
@@ -1965,6 +1966,8 @@ npc_ai::search_food_command_result begin_search( npc &who, food_search_state sta
     // player every turn it is not walking, which ruins the search.  A guard
     // is released too (guards are stationary and never pick anything up);
     // both follow the player again on the way back.
+    // A search supersedes a hideout: the companion leaves the room anyway.
+    npc_ai::cancel_hide( who );
     state.was_following = who.is_following();
     keep_follow_suspended( who );
     debug_line( "SEARCH_FOLLOW_SUSPENDED" );
