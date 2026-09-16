@@ -29,10 +29,22 @@ struct watch_action_result {
     std::string raw_output;
 };
 
+// Deterministic: recognises the request, builds the selector from the
+// player's own words (plus the synonym groups in data/npc_ai/watch_synonyms.txt
+// and the fixed categories cargador / municion / arma de fuego) and registers
+// the watch on the companion at once.  No model request is made.
 watch_action_result parse_watch_action(
     npc &who,
     const std::string &player_line
 );
+
+// The selector a request would produce ("@MAGAZINE", "@idlike:gloves|guantes"),
+// empty when the line names nothing to watch.  Exposed for tests and tooling.
+std::string build_local_watch_selector( const std::string &player_line );
+
+// Loads (once) the synonym groups; returns the expansions of one normalised
+// word, the word itself excluded.
+std::vector<std::string> watch_synonyms_for( const std::string &word );
 
 watch_action_result parse_watch_action_response( const std::string &player_line,
         const std::string &model_output );

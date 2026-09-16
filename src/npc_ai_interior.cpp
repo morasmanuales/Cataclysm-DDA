@@ -11,6 +11,9 @@
 #include "game.h"
 #include "map.h"
 #include "npc.h"
+#include "npc_ai_async.h"
+#include "npc_ai_context.h"
+#include "npctalk.h"
 #include "pathfinding.h"
 #include "point.h"
 #include "translations.h"
@@ -191,8 +194,12 @@ interior_order_result execute_enter_nearest_reachable_safe_interior(
             continue;
         }
         reserved.insert( *chosen );
-        who->goto_to_this_pos = here.get_abs( *chosen );
-        result.assignments.emplace_back( who->getID().get_value(), here.get_abs( *chosen ) );
+        const tripoint_abs_ms destination = here.get_abs( *chosen );
+        who->goto_to_this_pos = destination;
+        // Remember the tile so arrival turns into a guard post (see
+        // on_move_destination_reached) instead of resuming the follow.
+        who->ai_interior_hold_pos = destination;
+        result.assignments.emplace_back( who->getID().get_value(), destination );
     }
 
     result.success = result.assignments.size() == targets.size();
@@ -200,6 +207,38 @@ interior_order_result execute_enter_nearest_reachable_safe_interior(
                      result.assignments.empty() ? _( "I can't reach a safe interior from here." ) :
                      _( "Some of us can't reach a safe interior from here." );
     return result;
+}
+
+bool on_move_destination_reached( npc &who, const tripoint_abs_ms &reached )
+{
+    if( !who.ai_interior_hold_pos || *who.ai_interior_hold_pos != reached ) {
+        // A manual "move here" order or an unrelated walk: nothing to do.
+        return false;
+    }
+    who.ai_interior_hold_pos = std::nullopt;
+    if( !who.is_player_ally() ) {
+        return false;
+    }
+    // Same transition as the spoken "stay here": the companion stops
+    // following and guards the interior tile it just reached.
+    talk_function::assign_guard( who );
+    who.set_guard_pos( reached );
+    say_command_reply( who, localized_ai_message( _( "I'm inside.  I'll hold here." ),
+                       "Ya estoy dentro.  Me quedo aquí." ) );
+    return true;
+}
+
+void clear_interior_hold( npc &who )
+{
+    if( !who.ai_interior_hold_pos ) {
+        return;
+    }
+    // The walk itself was only issued for the hold; drop it too so the
+    // companion obeys the newer order at once.
+    if( who.goto_to_this_pos && *who.goto_to_this_pos == *who.ai_interior_hold_pos ) {
+        who.goto_to_this_pos = std::nullopt;
+    }
+    who.ai_interior_hold_pos = std::nullopt;
 }
 
 } // namespace npc_ai

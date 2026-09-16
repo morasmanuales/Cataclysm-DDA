@@ -14,7 +14,7 @@ namespace
 
 // -1 keeps the environment decision, 0/1 is a deliberate test override.
 std::atomic<int> runtime_debug_override{ -1 };
-std::mutex debug_output_mutex;
+std::recursive_mutex debug_output_mutex;
 
 } // namespace
 
@@ -46,7 +46,7 @@ debug_stream::debug_stream( const std::string &filename, const bool truncate )
     if( !runtime_debug_enabled() ) {
         return;
     }
-    lock_ = std::unique_lock<std::mutex>( debug_output_mutex );
+    lock_ = std::unique_lock<std::recursive_mutex>( debug_output_mutex );
     stream_.open( debug_file_path( filename ),
                   std::ios::binary | ( truncate ? std::ios::trunc : std::ios::app ) );
     active_ = stream_.is_open();

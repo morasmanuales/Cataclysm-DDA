@@ -85,6 +85,7 @@
 #include "npc_ai_context.h"
 #include "npc_ai_equipment_memory.h"
 #include "npc_ai_fire.h"
+#include "npc_ai_interior.h"
 #include "npc_ai_profiler.h"
 #include "npc_ai_rescue.h"
 #include "npc_ai_survival.h"
@@ -1410,6 +1411,11 @@ void npc::move()
         if( !has_rescue_claim && npc_ai::process_start_fire_task( *this ) ) {
             return;
         }
+        // "Busca comida": walk the nearby spots and inspect them; the pickups
+        // themselves run through the food batch and the directed pickup engine.
+        if( !has_rescue_claim && npc_ai::process_food_search( *this ) ) {
+            return;
+        }
         // Vehicle unloading remains a deterministic goal; ACT_MOVE_LOOT performs the hauling.
         if( !has_rescue_claim && npc_ai::process_vehicle_unload_task( *this ) ) {
             return;
@@ -2033,7 +2039,10 @@ void npc::execute_action( npc_action action )
             move_to_next();
 
             if( pos_abs() == *goto_to_this_pos ) {
+                const tripoint_abs_ms reached = *goto_to_this_pos;
                 goto_to_this_pos = std::nullopt;
+                // A pending "get inside" order ends as a guard post here.
+                npc_ai::on_move_destination_reached( *this, reached );
             }
             break;
         }

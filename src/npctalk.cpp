@@ -107,6 +107,7 @@
 #include "npc_ai_watchlist.h"
 #include "npc_ai_action_parser.h"
 #include "npc_ai_order_intent.h"
+#include "npc_ai_order_menu.h"
 #include "npc_ai_pickup.h"
 #include "npc_ai_batch_pickup.h"
 #include "npc_ai_wield.h"
@@ -667,6 +668,7 @@ enum npc_chat_menu {
     NPC_CHAT_DONE,
     NPC_CHAT_TALK,
     NPC_CHAT_AI_TALK,
+    NPC_CHAT_AI_ORDERS,
     NPC_CHAT_YELL,
     NPC_CHAT_EMOTE,
     NPC_CHAT_START_SEMINAR,
@@ -1253,6 +1255,127 @@ void game::ai_talk()
              _( "Who do you want to talk to?" ), true );
 }
 
+void game::ai_orders_menu()
+{
+    const std::vector<npc *> talkers = npc_ai::get_nearby_ai_talkers( true );
+    if( talkers.empty() ) {
+        add_msg( m_info, npc_ai::localized_ai_message(
+                     _( "No companion is available to receive orders." ),
+                     "No hay ningún compañero disponible para recibir órdenes." ) );
+        return;
+    }
+
+    // 1. Which order.  The catalogue is closed: every entry maps to a phrase
+    //    the deterministic keyword parsers already execute.
+    const std::vector<npc_ai::menu_order_entry> catalogue = npc_ai::order_menu_catalogue();
+    uilist order_menu;
+    order_menu.text = npc_ai::localized_ai_message( _( "What do you order your companions?" ),
+                      "¿Qué les ordenas a tus compañeros?" );
+    order_menu.desc_enabled = true;
+    std::optional<npc_ai::menu_order_group> current_group;
+    for( std::size_t i = 0; i < catalogue.size(); ++i ) {
+        if( !current_group || *current_group != catalogue[i].group ) {
+            current_group = catalogue[i].group;
+            // Disabled line without hotkey: a plain section header.
+            order_menu.addentry( -1, false, 0, npc_ai::menu_order_group_title( *current_group ) );
+        }
+        order_menu.addentry_desc( static_cast<int>( i ), true, catalogue[i].hotkey,
+                                  catalogue[i].label, catalogue[i].description );
+    }
+    order_menu.query();
+    if( order_menu.ret < 0 || static_cast<std::size_t>( order_menu.ret ) >= catalogue.size() ) {
+        return;
+    }
+    const npc_ai::menu_order_entry entry = catalogue[order_menu.ret];
+
+    // 2. Who receives it.  Same selector as the AI conversation: one
+    //    companion, or "everyone" when more than one can hear you.
+    const std::string who_prompt = npc_ai::localized_ai_message( _( "Who receives the order?" ),
+                                   "¿Quién recibe la orden?" );
+    const npc_ai::ai_conversation_selection selection = npc_ai::select_ai_conversation_targets(
+    talkers, [&]( const std::vector<npc *> &candidates ) {
+        return ai_conversation_select_menu( candidates, who_prompt );
+    } );
+    if( selection.targets.empty() ) {
+        return;
+    }
+
+    // 3. The target, when the order needs one.
+    std::string target;
+    if( entry.target == npc_ai::menu_order_target::item_words ) {
+        string_input_popup popup;
+        popup.title( entry.label )
+        .width( 48 )
+        .description( npc_ai::order_menu_target_prompt( entry.id ) )
+        .identifier( "npc_ai_order_target" )
+        .max_length( 96 )
+        .query();
+        target = popup.text();
+        if( target.empty() ) {
+            return;
+        }
+    } else if( entry.target == npc_ai::menu_order_target::ally_name ) {
+        std::vector<npc *> casualties;
+        for( npc &candidate : all_npcs() ) {
+            if( candidate.is_active() && candidate.is_player_ally() ) {
+                casualties.push_back( &candidate );
+            }
+        }
+        // With a single addressee that companion cannot drag itself.
+        if( !selection.everyone && selection.targets.size() == 1 ) {
+            casualties.erase( std::remove( casualties.begin(), casualties.end(),
+                                           selection.targets.front() ), casualties.end() );
+        }
+        if( casualties.empty() ) {
+            add_msg( m_info, npc_ai::localized_ai_message(
+                         _( "There is no companion to drag." ), "No hay ningún compañero que arrastrar." ) );
+            return;
+        }
+        uilist casualty_menu;
+        casualty_menu.text = npc_ai::order_menu_target_prompt( entry.id );
+        std::vector<tripoint_bub_ms> locations;
+        for( std::size_t i = 0; i < casualties.size(); ++i ) {
+            casualty_menu.addentry( static_cast<int>( i ), true, MENU_AUTOASSIGN,
+                                    casualties[i]->name_and_activity() );
+            locations.push_back( casualties[i]->pos_bub() );
+        }
+        pointmenu_cb callback( locations );
+        casualty_menu.callback = &callback;
+        casualty_menu.query();
+        if( casualty_menu.ret < 0 ||
+            static_cast<std::size_t>( casualty_menu.ret ) >= casualties.size() ) {
+            return;
+        }
+        target = casualties[casualty_menu.ret]->get_name();
+    }
+
+    const std::string player_line = npc_ai::order_menu_phrase( entry.id, target );
+    if( player_line.empty() ) {
+        return;
+    }
+    // From here on this is indistinguishable from having typed the phrase.
+    npc_ai::log_ai_player_speech( selection.everyone, selection.targets.front()->get_name(),
+                                  player_line );
+    add_msg_debug( debugmode::DF_NPC_ITEMAI, "ORDER_MENU entry=%d line=\"%s\" everyone=%s",
+                   static_cast<int>( entry.id ), player_line, selection.everyone ? "yes" : "no" );
+    if( !selection.everyone || entry.native_group_path ) {
+        ai_dispatch_player_line( selection, player_line );
+        return;
+    }
+    // "Everyone" for an order whose handler only exists on the single
+    // companion path: each companion receives the same phrase individually,
+    // so the behaviour per NPC is exactly the typed single order and nothing
+    // falls through to group dialogue.
+    for( npc *companion : selection.targets ) {
+        if( companion == nullptr ) {
+            continue;
+        }
+        npc_ai::ai_conversation_selection single;
+        single.targets.push_back( companion );
+        ai_dispatch_player_line( single, player_line );
+    }
+}
+
 void game::npc_move_command()
 {
     Character &player = get_player_character();
@@ -1338,6 +1461,16 @@ void game::ai_talk( const std::vector<npc *> &talkers, const std::string &select
         return;
     }
     npc_ai::log_ai_player_speech( selection.everyone, guy->get_name(), player_line );
+    ai_dispatch_player_line( selection, player_line );
+}
+
+void game::ai_dispatch_player_line( const npc_ai::ai_conversation_selection &selection,
+                                    const std::string &player_line )
+{
+    if( selection.targets.empty() || player_line.empty() ) {
+        return;
+    }
+    npc *guy = selection.targets.front();
     const auto log_command_intercept = [&]( const char *type, const char *state ) {
         add_msg_debug( debugmode::DF_NPC_ITEMAI,
                        "%s COMMAND_INTERCEPTED=%s COMMAND_STATE=%s "
@@ -1484,12 +1617,23 @@ void game::ai_talk( const std::vector<npc *> &talkers, const std::string &select
 
     const npc_ai::watch_action_result watch_action = npc_ai::parse_watch_action( *guy, player_line );
     if( watch_action.attempted ) {
-        if( watch_action.pending ) {
-            add_msg( m_info, string_format( _( "Talking with %s..." ), guy->get_name() ) );
+        log_command_intercept( "WATCH", watch_action.success ? "ACCEPTED" : "REJECTED" );
+        std::string reply;
+        if( watch_action.success ) {
+            std::string what;
+            for( const std::string &term : watch_action.terms ) {
+                what += ( what.empty() ? "" : " " ) + term;
+            }
+            reply = string_format( npc_ai::localized_ai_message(
+                                       _( "Alright, I'll let you know if I see %s." ),
+                                       "Vale, te aviso si veo %s." ), what );
         } else {
-            add_msg( m_info, string_format( _( "%s is still thinking about the previous question." ),
-                                           guy->get_name() ) );
+            reply = npc_ai::localized_ai_message(
+                        _( "What exactly should I watch for?" ),
+                        "¿Qué quieres exactamente que vigile?" );
         }
+        npc_ai::say_command_reply( *guy, reply );
+        npc_ai::remember_exchange( *guy, player_line, reply );
         return;
     }
 
@@ -1520,6 +1664,24 @@ void game::ai_talk( const std::vector<npc *> &talkers, const std::string &select
                                equipment_result.success ? "ACCEPTED" : "REJECTED" );
         npc_ai::say_command_reply( *guy, equipment_result.message );
         npc_ai::remember_exchange( *guy, player_line, equipment_result.message );
+        return;
+    }
+
+    const npc_ai::search_food_command_result search_food_result =
+        npc_ai::try_handle_search_food_command( *guy, player_line );
+    if( search_food_result.handled ) {
+        log_command_intercept( "FOOD_SEARCH", search_food_result.started ? "PENDING" : "REJECTED" );
+        npc_ai::say_command_reply( *guy, search_food_result.message );
+        npc_ai::remember_exchange( *guy, player_line, search_food_result.message );
+        return;
+    }
+
+    const npc_ai::search_food_command_result search_item_result =
+        npc_ai::try_handle_search_item_command( *guy, player_line );
+    if( search_item_result.handled ) {
+        log_command_intercept( "ITEM_SEARCH", search_item_result.started ? "PENDING" : "REJECTED" );
+        npc_ai::say_command_reply( *guy, search_item_result.message );
+        npc_ai::remember_exchange( *guy, player_line, search_item_result.message );
         return;
     }
 
@@ -1649,6 +1811,30 @@ void game::chat()
     uilist nmenu;
     nmenu.text = std::string( _( "What do you want to do?" ) );
 
+    // NPC AI block first: free conversation (same as the "q" key) and the
+    // closed catalogue of companion orders.  Section headers are disabled
+    // lines without hotkey so the vanilla entries below stay untouched.
+    const std::vector<npc *> ai_companions = npc_ai::get_nearby_ai_talkers( true );
+    if( !ai_talkers.empty() || !ai_companions.empty() ) {
+        nmenu.addentry( -1, false, 0, npc_ai::localized_ai_message( _( "— Companions (AI) —" ),
+                        "— Compañeros (IA) —" ) );
+        if( !ai_talkers.empty() ) {
+            nmenu.addentry( NPC_CHAT_AI_TALK, true, 'I',
+                            ai_talkers.size() == 1 ?
+                            string_format( npc_ai::localized_ai_message(
+                                               _( "Talk naturally with %s" ),
+                                               "Hablar con naturalidad con %s" ),
+                                           ai_talkers.front()->get_name() ) :
+                            npc_ai::localized_ai_message( _( "Talk naturally with someone…" ),
+                                    "Hablar con naturalidad con alguien…" ) );
+        }
+        if( !ai_companions.empty() ) {
+            nmenu.addentry( NPC_CHAT_AI_ORDERS, true, 'O',
+                            npc_ai::localized_ai_message( _( "Give orders to companions…" ),
+                                    "Dar órdenes a los compañeros…" ) );
+        }
+        nmenu.addentry( -1, false, 0, npc_ai::localized_ai_message( _( "— Other —" ), "— Otros —" ) );
+    }
     if( !available.empty() ) {
         const Creature *guy = available.front();
         std::string title;
@@ -1660,13 +1846,6 @@ void game::chat()
         nmenu.addentry( NPC_CHAT_TALK, true, 't', available_count == 1 ?
                         string_format( _( "Talk to %s" ), title ) :
                         _( "Talk to…" ) );
-    }
-    if( !ai_talkers.empty() ) {
-        nmenu.addentry( NPC_CHAT_AI_TALK, true, 'I',
-                        ai_talkers.size() == 1 ?
-                        string_format( _( "Talk naturally with %s (AI)" ),
-                                       ai_talkers.front()->get_name() ) :
-                        _( "Talk naturally with someone (AI)…" ) );
     }
 
     if( !available_for_activities.empty() ) {
@@ -1702,7 +1881,11 @@ void game::chat()
         nmenu.addentry( NPC_CHAT_ANIMAL_VEHICLE_STOP_FOLLOW, true, 'S',
                         _( "Whistle at your animals pulling vehicles to stop following you." ) );
     }
-    if( !guards.empty() ) {
+    // "Follow me" and "Guard this position" live in the AI orders while any
+    // AI companion is in sight; the vanilla one-by-one versions come back
+    // only when none is.
+    const bool ai_orders_cover_tactical = !ai_companions.empty();
+    if( !guards.empty() && !ai_orders_cover_tactical ) {
         nmenu.addentry( NPC_CHAT_FOLLOW, true, 'f', guard_count == 1 ?
                         string_format( _( "Tell %s to follow" ), guards.front()->get_name() ) :
                         _( "Tell someone to follow…" )
@@ -1713,10 +1896,12 @@ void game::chat()
         nmenu.addentry( NPC_CHAT_START_SEMINAR, enable_seminar, 'T',
                         enable_seminar ? _( "Start a training seminar" ) :
                         _( "Start a training seminar (You've already taught enough for now)" ) );
-        nmenu.addentry( NPC_CHAT_GUARD, true, 'g', follower_count == 1 ?
-                        string_format( _( "Tell %s to guard" ), followers.front()->get_name() ) :
-                        _( "Tell someone to guard…" )
-                      );
+        if( !ai_orders_cover_tactical ) {
+            nmenu.addentry( NPC_CHAT_GUARD, true, 'g', follower_count == 1 ?
+                            string_format( _( "Tell %s to guard" ), followers.front()->get_name() ) :
+                            _( "Tell someone to guard…" )
+                          );
+        }
         nmenu.addentry( NPC_CHAT_MOVE_TO_POS, true, 'G',
                         follower_count == 1 ? string_format( _( "Tell %s to move to location" ),
                                 followers.front()->get_name() ) : _( "Tell someone to move to location…" ) );
@@ -1752,6 +1937,9 @@ void game::chat()
             ai_talk( ai_talkers, _( "Who do you want to talk to?" ), false );
             break;
         }
+        case NPC_CHAT_AI_ORDERS:
+            ai_orders_menu();
+            break;
 
         case NPC_CHAT_YELL:
             is_order = false;

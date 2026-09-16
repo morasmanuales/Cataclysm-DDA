@@ -49,7 +49,10 @@ class debug_stream
 
     private:
         bool active_ = false;
-        std::unique_lock<std::mutex> lock_;
+        // Recursive: a handler that holds its own stream may call into another
+        // routine (npc::ai_request_pickup, the wield router) that opens a second
+        // stream on the same thread.  A plain mutex would self-deadlock there.
+        std::unique_lock<std::recursive_mutex> lock_;
         std::ofstream stream_;
 };
 

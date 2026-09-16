@@ -5,24 +5,33 @@
 #include <cstddef>
 #include <deque>
 #include <fstream>
+#include <limits>
+#include <map>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "catacharset.h"
+#include "character_id.h"
 #include "game.h"
 #include "item.h"
 #include "item_location.h"
 #include "map.h"
 #include "map_selector.h"
 #include "npc.h"
+#include "pathfinding.h"
 #include "npc_ai_context.h"
 #include "npc_ai_debug.h"
+#include "npctalk.h"
 #include "output.h"
 #include "point.h"
 #include "string_formatter.h"
 #include "translations.h"
+#include "unicode.h"
 
 
 namespace
@@ -67,6 +76,8 @@ struct food_batch_state {
     int waiting_ticks = 0;
     std::string last_failure_name;
     std::string last_failure_reason;
+    // Names of the items actually collected, for the search reports.
+    std::vector<std::string> collected_names;
 };
 
 
@@ -1452,8 +1463,462 @@ void finish_batch(
 }
 
 
-} // namespace
 
+
+// ============================================================
+// CDDA-AI FOOD SEARCH ("busca comida")
+// ============================================================
+
+constexpr int food_search_radius = 10;
+constexpr std::size_t food_search_spot_limit = 40;
+constexpr int food_search_stuck_limit = 30;
+
+struct food_search_state {
+    bool active = false;
+    // false: any food.  true: items matching query_words.
+    bool named = false;
+    std::string query_display;
+    std::vector<std::string> query_words;
+    std::deque<tripoint_abs_ms> spots;
+    std::optional<tripoint_abs_ms> current;
+    // The pickup batch spawned for the last inspection is still running.
+    bool batch_running = false;
+    // Places already inspected: never visited or scanned twice.
+    std::set<tripoint_abs_ms> checked_spots;
+    std::size_t checked = 0;
+    std::size_t spots_with_food = 0;
+    std::size_t collected = 0;
+    // name -> count, for the final report.
+    std::map<std::string, int> collected_names;
+    int stuck_ticks = 0;
+    // The companion was following when the order arrived.  Following is
+    // suspended for the tour (the follow logic keeps pulling the companion
+    // back towards the player) and restored on the way back or on cancel.
+    bool was_following = false;
+    // Tour finished: walking back to the player with the report pending.
+    bool returning = false;
+    std::string report;
+    int return_ticks = 0;
+};
+
+// Safety net: deliver the report anyway if the way back takes too long.
+constexpr int food_search_return_timeout_ticks = 600;
+
+std::vector<queued_food_target> search_targets_on_tile( map &here, const tripoint_bub_ms &p,
+        const food_search_state &state );
+
+// While the tour runs the companion is neither following nor guarding: the
+// follow logic would pull it back to the player every idle turn, and a guard
+// counts as stationary and never reaches the pickup action.  Activities can
+// revert the attitude, so this is re-asserted every tick of the tour.
+void keep_follow_suspended( npc &who )
+{
+    if( who.is_walking_with() ) {
+        who.set_attitude( NPCATT_NULL );
+    }
+    if( who.is_guarding() ) {
+        who.set_mission( NPC_MISSION_NULL );
+    }
+}
+
+// Inspects every pending spot the companion can examine from where it stands
+// -- open piles in line of sight, containers only when adjacent -- removes
+// them from the tour and returns the matching items found.  Walking is only
+// needed for what cannot be seen from here.
+std::vector<queued_food_target> inspect_spots_from_here( npc &who, map &here,
+        food_search_state &state )
+{
+    std::vector<queued_food_target> targets;
+    const tripoint_bub_ms origin = who.pos_bub( here );
+    for( auto it = state.spots.begin(); it != state.spots.end(); ) {
+        const tripoint_bub_ms spot = here.get_bub( *it );
+        const bool adjacent = rl_dist( origin, spot ) <= 1;
+        const bool examinable = adjacent ||
+                                ( who.sees( here, spot ) && here.could_see_items( spot, who ) );
+        if( !examinable ) {
+            ++it;
+            continue;
+        }
+        state.checked_spots.insert( *it );
+        ++state.checked;
+        std::vector<queued_food_target> here_targets;
+        if( here.could_see_items( spot, who ) ) {
+            here_targets = search_targets_on_tile( here, spot, state );
+        }
+        debug_line( "SPOT_CHECKED=" + spot.to_string_writable() + " | from=" +
+                    origin.to_string_writable() + " | matches=" +
+                    std::to_string( here_targets.size() ) );
+        if( !here_targets.empty() ) {
+            ++state.spots_with_food;
+            targets.insert( targets.end(), here_targets.begin(), here_targets.end() );
+        }
+        it = state.spots.erase( it );
+    }
+    std::sort( targets.begin(), targets.end(), [&]( const queued_food_target &a,
+    const queued_food_target &b ) {
+        if( a.priority != b.priority ) {
+            return a.priority < b.priority;
+        }
+        return rl_dist( origin, a.location.pos_bub( here ) ) <
+               rl_dist( origin, b.location.pos_bub( here ) );
+    } );
+    return targets;
+}
+
+// Next place to walk to: the pending spot closest to where the companion is
+// now (greedy tour), not to where the order was given.
+std::optional<tripoint_abs_ms> take_nearest_spot( npc &who, map &here, food_search_state &state )
+{
+    const tripoint_bub_ms origin = who.pos_bub( here );
+    auto best = state.spots.end();
+    int best_distance = std::numeric_limits<int>::max();
+    for( auto it = state.spots.begin(); it != state.spots.end(); ++it ) {
+        const int distance = rl_dist( origin, here.get_bub( *it ) );
+        if( distance < best_distance ) {
+            best_distance = distance;
+            best = it;
+        }
+    }
+    if( best == state.spots.end() ) {
+        return std::nullopt;
+    }
+    const tripoint_abs_ms chosen = *best;
+    state.spots.erase( best );
+    return chosen;
+}
+
+// Queues a pickup batch for the matches found; false when nothing could start.
+bool start_search_pickups( npc &who, food_search_state &state,
+                           const std::vector<queued_food_target> &targets )
+{
+    if( targets.empty() ) {
+        return false;
+    }
+    const int key = npc_key( who );
+    food_batch_state pickup;
+    pickup.active = true;
+    pickup.found = targets.size();
+    for( const queued_food_target &target : targets ) {
+        pickup.queue.push_back( target );
+    }
+    food_batches[key] = pickup;
+    if( !start_next_target( who, food_batches[key] ) ) {
+        food_batches.erase( key );
+        return false;
+    }
+    keep_follow_suspended( who );
+    state.batch_running = true;
+    return true;
+}
+
+std::string normalize_search_text( const std::string &text )
+{
+    std::u32string codepoints = utf8_to_utf32( text );
+    for( char32_t &codepoint : codepoints ) {
+        u32_to_lowercase( codepoint );
+        remove_accent( codepoint );
+    }
+    std::string normalized;
+    bool previous_space = true;
+    for( const char32_t codepoint : codepoints ) {
+        if( ( codepoint >= U'a' && codepoint <= U'z' ) ||
+            ( codepoint >= U'0' && codepoint <= U'9' ) ) {
+            normalized.push_back( static_cast<char>( codepoint ) );
+            previous_space = false;
+        } else if( codepoint > 127 ) {
+            // Non-Latin letters survive as UTF-8 so names in other scripts
+            // still match against themselves.
+            normalized += utf32_to_utf8( codepoint );
+            previous_space = false;
+        } else if( !previous_space ) {
+            normalized.push_back( ' ' );
+            previous_space = true;
+        }
+    }
+    while( !normalized.empty() && normalized.back() == ' ' ) {
+        normalized.pop_back();
+    }
+    return normalized;
+}
+
+bool item_matches_search_words( const item &it, const std::vector<std::string> &words )
+{
+    if( words.empty() ) {
+        return false;
+    }
+    const std::string name = normalize_search_text( remove_color_tags( it.tname() ) );
+    const std::string id = normalize_search_text( it.typeId().str() );
+    for( const std::string &word : words ) {
+        if( name.find( word ) == std::string::npos && id.find( word ) == std::string::npos ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::unordered_map<int, food_search_state> food_searches;
+
+// A place worth checking: an item pile, or a container furniture whose
+// contents can only be seen from an adjacent tile (fridge, cupboard, shelf).
+bool tile_is_food_spot( map &here, const tripoint_bub_ms &p )
+{
+    static const std::string container_flag( "CONTAINER" );
+    const bool container = here.has_flag_ter_or_furn( container_flag, p );
+    if( container && here.has_flag_ter_or_furn( ter_furn_flag::TFLAG_SEALED, p ) ) {
+        return false;
+    }
+    return container || here.has_items( p );
+}
+
+std::vector<queued_food_target> search_targets_on_tile( map &here, const tripoint_bub_ms &p,
+        const food_search_state &state )
+{
+    std::vector<queued_food_target> targets;
+    for( item &it : here.i_at( p ) ) {
+        if( state.named ) {
+            if( !item_matches_search_words( it, state.query_words ) ) {
+                continue;
+            }
+        } else if( !( it.is_food() || it.is_food_container() ) ) {
+            continue;
+        }
+        item_location location( map_cursor( p ), &it );
+        if( !location ) {
+            continue;
+        }
+        queued_food_target target;
+        target.location = location;
+        target.id = it.typeId().str();
+        target.name = remove_color_tags( it.tname() );
+        if( state.named ) {
+            target.priority = 0;
+            target.priority_reason = "requested";
+        } else {
+            const food_priority_info priority_info = classify_food_priority( target.name );
+            target.priority = priority_info.priority;
+            target.quota_group = priority_info.quota_group;
+            target.priority_reason = priority_info.reason;
+        }
+        targets.push_back( target );
+    }
+    std::sort( targets.begin(), targets.end(), []( const queued_food_target &a,
+    const queued_food_target &b ) {
+        return a.priority < b.priority;
+    } );
+    return targets;
+}
+
+// Same approach as the fire task: path to the closest passable tile next to
+// the spot (the spot itself may be impassable furniture).
+bool route_next_to_spot( npc &who, const tripoint_bub_ms &spot )
+{
+    map &here = get_map();
+    const tripoint_bub_ms origin = who.pos_bub( here );
+    std::vector<tripoint_bub_ms> candidates = closest_points_first( spot, 1 );
+    std::sort( candidates.begin(), candidates.end(), [&]( const tripoint_bub_ms &lhs,
+    const tripoint_bub_ms &rhs ) {
+        return rl_dist( origin, lhs ) < rl_dist( origin, rhs );
+    } );
+    for( const tripoint_bub_ms &candidate : candidates ) {
+        if( candidate.z() != spot.z() || !here.passable_through( candidate ) ||
+            g->is_dangerous_tile( candidate ) ) {
+            continue;
+        }
+        if( candidate == origin ) {
+            who.path.clear();
+            return true;
+        }
+        if( who.update_path( candidate, true ) && !who.path.empty() ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void start_return_to_player( npc &who, food_search_state &state, const std::string &report );
+void cancel_same_item_searches( const npc &finder, const food_search_state &done );
+
+void finish_food_search( npc &who, food_search_state &state )
+{
+    std::ostringstream debug;
+    debug << "SEARCH_FINISHED | checked=" << state.checked << " | spots_with_food="
+          << state.spots_with_food << " | collected=" << state.collected;
+    debug_line( debug.str() );
+    const std::string what = state.named ? state.query_display :
+                             npc_ai::localized_ai_message( _( "food" ), "comida" );
+    if( !state.spots.empty() ) {
+        debug_line( "SEARCH_STOPPED_EARLY | pending=" + std::to_string( state.spots.size() ) );
+    }
+    if( state.collected_names.empty() ) {
+        state.report = string_format( npc_ai::localized_ai_message(
+                                          _( "I checked %1$d places and found no %2$s I could take." ),
+                                          "Revisé %1$d sitios y no encontré %2$s que pudiera llevarme." ),
+                                      static_cast<int>( state.checked ), what );
+    } else {
+        std::string listing;
+        for( const std::pair<const std::string, int> &entry : state.collected_names ) {
+            if( !listing.empty() ) {
+                listing += ", ";
+            }
+            listing += string_format( "%d x %s", entry.second, entry.first );
+        }
+        state.report = string_format( npc_ai::localized_ai_message(
+                                          _( "I checked %1$d places.  I picked up: %2$s." ),
+                                          "Revisé %1$d sitios.  Recogí: %2$s." ),
+                                      static_cast<int>( state.checked ), listing );
+    }
+
+    // The tour is over: rejoin the player and deliver the report on arrival.
+    // A guarding companion goes back to following, and the walk aims at
+    // where the player is right now so the return is deliberate instead of
+    // waiting for the follow logic to notice the distance.
+    if( !who.is_player_ally() || who.is_dead_state() ) {
+        who.say( state.report );
+        food_searches.erase( npc_key( who ) );
+        return;
+    }
+    if( state.named && state.collected > 0 ) {
+        cancel_same_item_searches( who, state );
+    }
+    start_return_to_player( who, state, state.report );
+}
+
+// Sends a companion back to the player with a pending report.
+void start_return_to_player( npc &who, food_search_state &state, const std::string &report )
+{
+    if( !who.is_following() ) {
+        // Restores the follow suspended at the start of the tour (or ends a
+        // guard post the companion held before the order).
+        talk_function::stop_guard( who );
+    }
+    who.goto_to_this_pos = get_player_character().pos_abs();
+    who.path.clear();
+    state.current.reset();
+    state.spots.clear();
+    state.batch_running = false;
+    state.report = report;
+    state.returning = true;
+    state.return_ticks = 0;
+    // A pickup batch still running would fight the walk back.
+    food_batches.erase( npc_key( who ) );
+    debug_line( "SEARCH_RETURN_TO_PLAYER=" +
+                get_player_character().pos_bub().to_string_writable() );
+}
+
+// A group "find X" order ends for everyone when one companion has X in hand:
+// the others stop where they are and walk back too.
+void cancel_same_item_searches( const npc &finder, const food_search_state &done )
+{
+    if( !done.named ) {
+        return;
+    }
+    for( std::pair<const int, food_search_state> &entry : food_searches ) {
+        food_search_state &other = entry.second;
+        if( entry.first == npc_key( finder ) || !other.active || !other.named ||
+            other.returning || other.query_words != done.query_words ) {
+            continue;
+        }
+        npc *companion = g->find_npc( character_id( entry.first ) );
+        if( companion == nullptr ) {
+            other.active = false;
+            continue;
+        }
+        debug_line( "SEARCH_CANCELLED_BY_GROUP | npc=" + companion->get_name() );
+        start_return_to_player( *companion, other, string_format(
+                                    npc_ai::localized_ai_message(
+                                        _( "%1$s already found %2$s, I'm heading back." ),
+                                        "%1$s ya encontró %2$s, vuelvo." ),
+                                    finder.get_name(), done.query_display ) );
+    }
+}
+
+// Returning phase: the normal follow logic walks the companion back (the
+// goto destination was set on the player); once next to the player, or
+// when the walk is over, the report is spoken and the search is closed.
+void continue_return_to_player( npc &who, food_search_state &state )
+{
+    map &here = get_map();
+    const Character &player = get_player_character();
+    const bool next_to_player = rl_dist( who.pos_bub( here ), player.pos_bub( here ) ) <= 2 &&
+                                who.sees( here, player.pos_bub( here ) );
+    const bool walk_over = !who.goto_to_this_pos.has_value();
+    const bool timed_out = ++state.return_ticks > food_search_return_timeout_ticks;
+    if( !next_to_player && !walk_over && !timed_out ) {
+        return;
+    }
+    debug_line( std::string( "SEARCH_REPORT_DELIVERED | " ) +
+                ( next_to_player ? "next_to_player" : walk_over ? "walk_over" : "timeout" ) );
+    who.goto_to_this_pos = std::nullopt;
+    who.say( state.report );
+    food_searches.erase( npc_key( who ) );
+}
+
+// Shared start of both search orders: collects the spots and arms the state.
+npc_ai::search_food_command_result begin_search( npc &who, food_search_state state,
+        const std::string &accept_message )
+{
+    npc_ai::search_food_command_result result;
+    result.handled = true;
+    if( who.has_player_activity() ) {
+        result.message = npc_ai::localized_ai_message(
+                             _( "I am busy with another task right now." ),
+                             "Ahora mismo estoy ocupado con otra tarea." );
+        return result;
+    }
+
+    map &here = get_map();
+    const tripoint_bub_ms origin = who.pos_bub( here );
+    std::vector<tripoint_bub_ms> spots;
+    for( const tripoint_bub_ms &p : here.points_in_radius( origin, food_search_radius, 0 ) ) {
+        if( p == origin || !tile_is_food_spot( here, p ) ) {
+            continue;
+        }
+        spots.push_back( p );
+    }
+    // Nearest first; unreachable spots are dropped while walking, so the
+    // order only needs to be a sensible tour.
+    std::sort( spots.begin(), spots.end(), [&]( const tripoint_bub_ms &lhs,
+    const tripoint_bub_ms &rhs ) {
+        return rl_dist( origin, lhs ) < rl_dist( origin, rhs );
+    } );
+    if( spots.size() > food_search_spot_limit ) {
+        spots.resize( food_search_spot_limit );
+    }
+    debug_line( "SEARCH_SPOTS=" + std::to_string( spots.size() ) );
+    if( spots.empty() ) {
+        result.message = npc_ai::localized_ai_message(
+                             _( "There is nowhere nearby worth checking." ),
+                             "No veo ningún sitio cercano donde buscar." );
+        debug_line( "RESULT=NO_SPOTS" );
+        return result;
+    }
+
+    state.active = true;
+    // Suspend following for the tour: a follower is pulled back towards the
+    // player every turn it is not walking, which ruins the search.  A guard
+    // is released too (guards are stationary and never pick anything up);
+    // both follow the player again on the way back.
+    state.was_following = who.is_following();
+    keep_follow_suspended( who );
+    debug_line( "SEARCH_FOLLOW_SUSPENDED" );
+    for( const tripoint_bub_ms &p : spots ) {
+        const tripoint_abs_ms abs = here.get_abs( p );
+        if( state.checked_spots.count( abs ) == 0 &&
+            std::find( state.spots.begin(), state.spots.end(), abs ) == state.spots.end() ) {
+            state.spots.push_back( abs );
+        }
+    }
+    food_searches[npc_key( who )] = state;
+    // Any batch still running from an earlier order is superseded.
+    food_batches.erase( npc_key( who ) );
+
+    result.started = true;
+    result.message = accept_message;
+    debug_line( "RESULT=STARTED" );
+    return result;
+}
+
+} // namespace
 
 namespace npc_ai
 {
@@ -1703,6 +2168,7 @@ void process_batch_pickup(
         else {
 
             ++state.collected;
+            state.collected_names.push_back( state.current_name );
 
 
             std::ostringstream collected_debug;
@@ -1755,9 +2221,240 @@ void process_batch_pickup(
 }
 
 
+bool is_search_food_command( const std::string &player_line )
+{
+    const std::string line = lower_ascii( player_line );
+    if( contains_any( line, { "no busques", "no busquen", "don't look for", "do not look for" } ) ) {
+        return false;
+    }
+    return contains_any( line, {
+        "busca comida", "buscar comida", "busquen comida", "buscad comida",
+        "busca algo de comer", "busquen algo de comer", "busca alimentos", "busquen alimentos",
+        "search for food", "look for food", "find food", "find some food", "forage for food"
+    } );
+}
+
+search_food_command_result try_handle_search_food_command( npc &who,
+        const std::string &player_line )
+{
+    search_food_command_result result;
+    if( !is_search_food_command( player_line ) ) {
+        return result;
+    }
+    reset_debug( who, player_line );
+    debug_line( "INTENT=FOOD_SEARCH" );
+    food_search_state state;
+    state.named = false;
+    return begin_search( who, state, npc_ai::localized_ai_message(
+                             _( "Alright, I'll check around here for food." ),
+                             "Vale, voy a revisar los alrededores en busca de comida." ) );
+}
+
+std::vector<std::string> normalize_search_words( const std::string &request )
+{
+    static const std::vector<std::string> filler = {
+        "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al", "mi", "mis",
+        "tu", "tus", "su", "sus", "algun", "alguna", "algo", "por", "favor", "y", "trae", "traeme",
+        "the", "a", "an", "some", "my", "any", "for", "me", "please", "and", "bring"
+    };
+    std::vector<std::string> words;
+    std::istringstream stream( normalize_search_text( request ) );
+    std::string word;
+    while( stream >> word ) {
+        if( word.size() < 2 ||
+            std::find( filler.begin(), filler.end(), word ) != filler.end() ) {
+            continue;
+        }
+        if( std::find( words.begin(), words.end(), word ) == words.end() ) {
+            words.push_back( word );
+        }
+    }
+    return words;
+}
+
+std::string parse_search_item_request( const std::string &player_line )
+{
+    if( is_search_food_command( player_line ) ) {
+        return std::string();
+    }
+    const std::string normalized = normalize_search_text( player_line );
+    static const std::vector<std::string> prefixes = {
+        "busca y trae ", "buscad y traed ", "busquen y traigan ", "busca y traeme ",
+        "busca ", "buscar ", "busquen ", "buscad ", "buscame ", "busqueme ",
+        "search for ", "look for ", "find me ", "find "
+    };
+    for( const std::string &prefix : prefixes ) {
+        if( normalized.compare( 0, prefix.size(), prefix ) == 0 &&
+            normalized.size() > prefix.size() ) {
+            return normalized.substr( prefix.size() );
+        }
+    }
+    return std::string();
+}
+
+search_food_command_result try_handle_search_item_command( npc &who,
+        const std::string &player_line )
+{
+    search_food_command_result result;
+    const std::string request = parse_search_item_request( player_line );
+    if( request.empty() ) {
+        return result;
+    }
+    const std::vector<std::string> words = normalize_search_words( request );
+    reset_debug( who, player_line );
+    debug_line( "INTENT=ITEM_SEARCH | request=" + request );
+    if( words.empty() ) {
+        result.handled = true;
+        result.message = npc_ai::localized_ai_message(
+                             _( "What exactly should I look for?" ),
+                             "¿Qué debo buscar exactamente?" );
+        return result;
+    }
+    food_search_state state;
+    state.named = true;
+    state.query_words = words;
+    std::string display;
+    for( const std::string &word : words ) {
+        display += ( display.empty() ? "" : " " ) + word;
+    }
+    state.query_display = display;
+    return begin_search( who, state, string_format( npc_ai::localized_ai_message(
+                             _( "Alright, I'll look around here for %s." ),
+                             "Vale, voy a buscar %s por los alrededores." ), display ) );
+}
+
+bool process_food_search( npc &who )
+{
+    const int key = npc_key( who );
+    const auto found = food_searches.find( key );
+    if( found == food_searches.end() || !found->second.active ) {
+        return false;
+    }
+    food_search_state &state = found->second;
+
+    if( state.returning ) {
+        continue_return_to_player( who, state );
+        // The follow logic owns the movement while walking back.
+        return false;
+    }
+    keep_follow_suspended( who );
+
+    // A pickup batch spawned by the last inspection drives itself through
+    // process_batch_pickup and the directed pickup engine; wait for it.
+    const auto batch = food_batches.find( key );
+    if( batch != food_batches.end() && batch->second.active ) {
+        return false;
+    }
+    if( state.batch_running ) {
+        state.batch_running = false;
+        if( batch != food_batches.end() ) {
+            state.collected += batch->second.collected;
+            for( const std::string &name : batch->second.collected_names ) {
+                ++state.collected_names[name];
+            }
+            food_batches.erase( batch );
+        }
+    }
+
+    map &here = get_map();
+
+    // A named search ends as soon as the requested object is in hand.
+    if( state.named && state.collected > 0 ) {
+        finish_food_search( who, state );
+        return false;
+    }
+
+    // Examine everything examinable from this position before walking
+    // anywhere: piles in sight and any adjacent container.
+    if( !state.current ) {
+        const std::vector<queued_food_target> seen = inspect_spots_from_here( who, here, state );
+        if( start_search_pickups( who, state, seen ) ) {
+            // The directed pickup engine acts on this same turn.
+            return false;
+        }
+        state.current = take_nearest_spot( who, here, state );
+        if( !state.current ) {
+            finish_food_search( who, state );
+            return false;
+        }
+        state.stuck_ticks = 0;
+        who.path.clear();
+    }
+    const tripoint_bub_ms spot = here.get_bub( *state.current );
+
+    if( rl_dist( who.pos_bub( here ), spot ) > 1 ) {
+        if( who.current_target() != nullptr ) {
+            // Combat first; the search resumes afterwards.
+            return false;
+        }
+        if( who.path.empty() && !route_next_to_spot( who, spot ) ) {
+            debug_line( "SPOT_UNREACHABLE=" + spot.to_string_writable() );
+            state.checked_spots.insert( *state.current );
+            state.current.reset();
+            who.mod_moves( -who.get_speed() );
+            return true;
+        }
+        const tripoint_bub_ms before = who.pos_bub( here );
+        who.move_to_next();
+        keep_follow_suspended( who );
+        if( who.pos_bub( here ) == before && ++state.stuck_ticks > food_search_stuck_limit ) {
+            debug_line( "SPOT_STUCK=" + spot.to_string_writable() );
+            state.checked_spots.insert( *state.current );
+            state.current.reset();
+            who.path.clear();
+        }
+        return true;
+    }
+
+    // Adjacent (or on top): the spot goes back to the pending list for one
+    // tick so the shared inspection handles it together with everything else
+    // examinable from here (neighbouring piles, the container next to it).
+    state.spots.push_front( *state.current );
+    state.current.reset();
+    const std::vector<queued_food_target> targets = inspect_spots_from_here( who, here, state );
+    if( start_search_pickups( who, state, targets ) ) {
+        // The directed pickup engine acts on this same turn.
+        return false;
+    }
+    // Nothing to take here; checking takes a moment.
+    who.mod_moves( -who.get_speed() );
+    return true;
+}
+
+bool has_food_search( const npc &who )
+{
+    const auto found = food_searches.find( npc_key( who ) );
+    return found != food_searches.end() && found->second.active;
+}
+
+bool food_search_is_returning( const npc &who )
+{
+    const auto found = food_searches.find( npc_key( who ) );
+    return found != food_searches.end() && found->second.active && found->second.returning;
+}
+
+void cancel_food_search( const npc &who )
+{
+    const auto found = food_searches.find( npc_key( who ) );
+    if( found == food_searches.end() ) {
+        return;
+    }
+    const bool restore_follow = !who.is_following() && who.is_player_ally();
+    food_searches.erase( found );
+    food_batches.erase( npc_key( who ) );
+    if( restore_follow ) {
+        // The tour suspended the follow; a cancelled tour gives it back before
+        // whatever superseded it (a tactical order) applies its own state.
+        if( npc *companion = g->find_npc( who.getID() ) ) {
+            talk_function::stop_guard( *companion );
+        }
+    }
+}
+
 void reset_all_food_batches()
 {
     food_batches.clear();
+    food_searches.clear();
 }
 
 

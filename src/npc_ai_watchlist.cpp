@@ -1,4 +1,7 @@
 #include "npc_ai_watchlist.h"
+
+#include "catacharset.h"
+#include "unicode.h"
 #include "npc_ai_world_memory.h"
 
 #include <algorithm>
@@ -13,10 +16,20 @@
 #include "filesystem.h"
 #include "item.h"
 #include "map.h"
+#include "mapdata.h"
 #include "npc.h"
 #include "output.h"
 #include "npc_ai_profiler.h"
+#include "npc_ai_context.h"
+#include "messages.h"
 #include "path_info.h"
+#include "translations.h"
+#include "sounds.h"
+#include "string_formatter.h"
+#include "veh_type.h"
+#include "vehicle.h"
+#include "vpart_position.h"
+#include "vpart_range.h"
 #include "worldfactory.h"
 
 namespace
@@ -231,6 +244,125 @@ bool add_target(
     return true;
 }
 
+// Lowercase, accents removed, split on anything that is not a letter or a
+// digit: "guantes brigantina" -> {guantes, brigantina}; "gloves_work" ->
+// {gloves, work}.
+std::vector<std::string> watch_tokens( const std::string &text )
+{
+    std::u32string codepoints = utf8_to_utf32( text );
+    for( char32_t &codepoint : codepoints ) {
+        u32_to_lowercase( codepoint );
+        remove_accent( codepoint );
+    }
+    std::vector<std::string> tokens;
+    std::string current;
+    for( const char32_t codepoint : codepoints ) {
+        if( ( codepoint >= U'a' && codepoint <= U'z' ) ||
+            ( codepoint >= U'0' && codepoint <= U'9' ) ) {
+            current.push_back( static_cast<char>( codepoint ) );
+        } else if( codepoint > 127 ) {
+            current += utf32_to_utf8( codepoint );
+        } else if( !current.empty() ) {
+            tokens.push_back( current );
+            current.clear();
+        }
+    }
+    if( !current.empty() ) {
+        tokens.push_back( current );
+    }
+    return tokens;
+}
+
+// A fragment names a token when they are equal or differ only by a short
+// plural/gender ending (guante/guantes, bota/botas, glove/gloves).  Plain
+// substring matching was too loose: "rope" inside "europea" or "sirope",
+// "water" inside "waterfowl".
+bool fragment_names_token( const std::string &fragment, const std::string &token )
+{
+    if( fragment == token ) {
+        return true;
+    }
+    if( token.size() > fragment.size() ) {
+        return token.size() - fragment.size() <= 1 &&
+               token.compare( 0, fragment.size(), fragment ) == 0;
+    }
+    return fragment.size() - token.size() <= 1 &&
+           fragment.compare( 0, token.size(), token ) == 0 && token.size() >= 4;
+}
+
+// A multi-word fragment ("panel solar", "solar_panel", "work gloves") names
+// the object only when EVERY word names one of its tokens, in any order.  A
+// single word matches any token.  "panel solar" therefore never fires on a
+// "panel de madera", while "solar_panel" and "panel solar" both fire on the
+// id solar_panel and on the Spanish name "panel solar".
+bool fragment_names_all_tokens( const std::string &fragment, const std::vector<std::string> &tokens )
+{
+    const std::vector<std::string> fragment_tokens = watch_tokens( fragment );
+    if( fragment_tokens.empty() ) {
+        return false;
+    }
+    for( const std::string &wanted : fragment_tokens ) {
+        bool found = false;
+        for( const std::string &token : tokens ) {
+            if( fragment_names_token( wanted, token ) ) {
+                found = true;
+                break;
+            }
+        }
+        if( !found ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Installed things (vehicle parts, furniture) only have an id and a name:
+// the @idlike selector and plain text terms apply to them; the item-only
+// categories (@magazine, @gun, @ammo) and exact @id lists do not.
+bool installed_matches_target( const std::string &id, const std::string &name,
+                               const std::string &target )
+{
+    const std::string normalized = lower_ascii( target );
+    if( normalized.rfind( "@idlike:", 0 ) == 0 ) {
+        std::vector<std::string> tokens = watch_tokens( id );
+        const std::vector<std::string> name_tokens = watch_tokens( name );
+        tokens.insert( tokens.end(), name_tokens.begin(), name_tokens.end() );
+        std::size_t begin = 8;
+        while( begin <= normalized.size() ) {
+            const std::size_t end = normalized.find( '|', begin );
+            const std::string fragment = end == std::string::npos ? normalized.substr( begin ) :
+                                         normalized.substr( begin, end - begin );
+            if( fragment.size() >= 3 && fragment_names_all_tokens( fragment, tokens ) ) {
+                return true;
+            }
+            if( end == std::string::npos ) {
+                break;
+            }
+            begin = end + 1;
+        }
+        return false;
+    }
+    if( normalized.empty() || normalized.front() == '@' ) {
+        return false;
+    }
+    // Legacy plain text terms.
+    const std::string lower_name = lower_ascii( name );
+    std::size_t begin = 0;
+    while( begin <= normalized.size() ) {
+        const std::size_t end = normalized.find( '|', begin );
+        const std::string term = trim_copy( end == std::string::npos ? normalized.substr( begin ) :
+                                            normalized.substr( begin, end - begin ) );
+        if( !term.empty() && lower_name.find( term ) != std::string::npos ) {
+            return true;
+        }
+        if( end == std::string::npos ) {
+            break;
+        }
+        begin = end + 1;
+    }
+    return false;
+}
+
 bool matches_target( const item &it, const std::string &target )
 {
     const std::string normalized = lower_ascii( target );
@@ -264,6 +396,49 @@ bool matches_target( const item &it, const std::string &target )
     //
     // @id:combat_boots|@id:winter_boots
     // ----------------------------------------------------
+
+    // ----------------------------------------------------
+    // Fragmentos de ID o de nombre visible
+    //
+    // @idlike:gloves|glove
+    //
+    // Casa con cualquier tipo cuyo ID interno (ingles) o
+    // cuyo nombre visible (traducido) contenga alguno de
+    // los fragmentos.  Cubre familias completas ("gloves"
+    // son 118 tipos) sin enumerar IDs ni depender de un
+    // tope del catalogo.
+    // ----------------------------------------------------
+    if( normalized.rfind( "@idlike:", 0 ) == 0 ) {
+        std::vector<std::string> tokens = watch_tokens( it.typeId().str() );
+        const std::vector<std::string> name_tokens =
+            watch_tokens( remove_color_tags( it.tname() ) );
+        tokens.insert( tokens.end(), name_tokens.begin(), name_tokens.end() );
+        std::size_t begin = 8;
+        while( begin <= normalized.size() ) {
+            const std::size_t end =
+                normalized.find( '|', begin );
+            std::string fragment = end == std::string::npos ?
+                                   normalized.substr( begin ) :
+                                   normalized.substr( begin, end - begin );
+            const std::size_t first =
+                fragment.find_first_not_of( " \t\r\n" );
+            if( first == std::string::npos ) {
+                fragment.clear();
+            } else {
+                const std::size_t last =
+                    fragment.find_last_not_of( " \t\r\n" );
+                fragment = fragment.substr( first, last - first + 1 );
+            }
+            if( fragment.size() >= 3 && fragment_names_all_tokens( fragment, tokens ) ) {
+                return true;
+            }
+            if( end == std::string::npos ) {
+                break;
+            }
+            begin = end + 1;
+        }
+        return false;
+    }
 
     if( normalized.rfind( "@id:", 0 ) == 0 ) {
 
@@ -476,8 +651,8 @@ std::string build_watchlist_context(
 void check_item_watchlist( npc &who )
 {
     scoped_profile profile( profile_subsystem::watchlist );
-    watch_targets &targets =
-        targets_for( who );
+
+    watch_targets &targets = targets_for( who );
 
     // Esta es la ruta normal: sin busquedas activas
     // no se escanea absolutamente nada.
@@ -486,72 +661,89 @@ void check_item_watchlist( npc &who )
     }
 
     map &here = get_map();
+    constexpr int watch_radius = 6;
+    const tripoint_bub_ms origin = who.pos_bub( here );
 
-    for( const tripoint_bub_ms &p :
-         here.points_in_radius(
-             who.pos_bub( here ),
-             6
-         ) ) {
+    // One alert closes the task; every kind of find goes through here.
+    const auto announce = [&]( const std::size_t target_index, const std::string &type_id,
+    const std::string &name, const tripoint_bub_ms &where, const std::string &installed_on ) {
+        const std::string alert = installed_on.empty() ?
+                                  string_format( npc_ai::localized_ai_message(
+                                          _( "Hey, I found %s.  You asked me to let you know." ),
+                                          "¡Oye, encontré %s!  Me pediste que te avisara." ), name ) :
+                                  string_format( npc_ai::localized_ai_message(
+                                          _( "Hey, there is %1$s installed on %2$s.  You asked me to let you know." ),
+                                          "¡Oye, hay %1$s instalado en %2$s!  Me pediste que te avisara." ),
+                                          name, installed_on );
+        const tripoint_abs_ms abs_pos = here.get_abs( where );
+        npc_ai::remember_seen_item( who, type_id, name, abs_pos.x(), abs_pos.y(), abs_pos.z() );
+        // Magenta, so the alert stands out from ordinary chatter.
+        add_msg( m_mixed, "%s: %s", who.get_name(), alert );
+        // Una sola notificacion: una vez encontrado, el encargo queda cumplido.
+        targets.erase( targets.begin() + target_index );
+        save_targets( who, targets );
+    };
 
+    // Installed things first: vehicle parts (a solar panel on a car, a
+    // wheel), then furniture (a fridge, a workbench).  They are visible
+    // whenever the tile is, containers or not.
+    for( const wrapped_vehicle &wrapped : here.get_vehicles(
+             origin - tripoint_rel_ms{ watch_radius, watch_radius, 0 },
+             origin + tripoint_rel_ms{ watch_radius, watch_radius, 0 } ) ) {
+        if( wrapped.v == nullptr ) {
+            continue;
+        }
+        for( const vpart_reference &part : wrapped.v->get_all_parts() ) {
+            const tripoint_bub_ms where = part.pos_bub( here );
+            if( where.z() != origin.z() || rl_dist( origin, where ) > watch_radius ||
+                part.part().is_broken() || !who.sees( here, where ) ) {
+                continue;
+            }
+            const std::string part_id = part.info().id.str();
+            const std::string part_name = remove_color_tags( part.part().name( false ) );
+            for( std::size_t i = 0; i < targets.size(); ++i ) {
+                if( installed_matches_target( part_id, part_name, targets[i] ) ) {
+                    announce( i, part_id, part_name, where, wrapped.v->name );
+                    return;
+                }
+            }
+        }
+    }
+    for( const tripoint_bub_ms &p : here.points_in_radius( origin, watch_radius, 0 ) ) {
         if( !who.sees( here, p ) ) {
             continue;
         }
-
-        if( !here.could_see_items( p, who ) ) {
+        const furn_id furniture = here.furn( p );
+        if( furniture.id().str() == "f_null" ) {
             continue;
         }
+        const std::string furn_id_str = furniture.id().str();
+        const std::string furn_name = remove_color_tags( furniture.obj().name() );
+        for( std::size_t i = 0; i < targets.size(); ++i ) {
+            if( installed_matches_target( furn_id_str, furn_name, targets[i] ) ) {
+                announce( i, furn_id_str, furn_name, p, std::string() );
+                return;
+            }
+        }
+    }
 
+    // Loose items.
+    for( const tripoint_bub_ms &p : here.points_in_radius( origin, watch_radius, 0 ) ) {
+        if( !who.sees( here, p ) || !here.could_see_items( p, who ) ) {
+            continue;
+        }
         for( const item &it : here.i_at( p ) ) {
-
-            for( std::size_t i = 0;
-                 i < targets.size();
-                 ++i ) {
-
-                if( !matches_target(
-                        it,
-                        targets[i]
-                    ) ) {
-
+            for( std::size_t i = 0; i < targets.size(); ++i ) {
+                if( !matches_target( it, targets[i] ) ) {
                     continue;
                 }
-
-                const std::string alert =
-                    "Oye, encontre " +
-                    remove_color_tags( it.tname() ) +
-                    ". Me pediste que te avisara.";
-
-                // Convertimos la posicion local del mapa
-                // a coordenadas absolutas persistentes.
-                const tripoint_abs_ms abs_pos =
-                    here.get_abs( p );
-
-                npc_ai::remember_seen_item(
-                    who,
-                    it.typeId().str(),
-                    remove_color_tags( it.tname() ),
-                    abs_pos.x(),
-                    abs_pos.y(),
-                    abs_pos.z()
-                );
-
-                who.say( alert );
-
-                // Una sola notificacion por defecto.
-                // Una vez encontrado, el encargo queda cumplido.
-                targets.erase(
-                    targets.begin() + i
-                );
-
-                save_targets(
-                    who,
-                    targets
-                );
-
+                announce( i, it.typeId().str(), remove_color_tags( it.tname() ), p, std::string() );
                 return;
             }
         }
     }
 }
+
 
 void reset_watch_cache()
 {

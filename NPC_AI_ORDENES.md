@@ -34,6 +34,109 @@ decirlo en una línea más de una lista.
    encuentra nada real (no hay tal objeto), tampoco se ejecuta nada y la
    frase pasa a diálogo, donde el NPC puede decir que no ve ese objeto.
 
+## Menú de órdenes (sin escribir)
+
+Rama `feature/action-menu-miguel-actions` (07/09/2026). El menú **Charlar
+con PNJ** (tecla `C`) empieza con un bloque **Compañeros (IA)**: "Hablar con
+naturalidad" (`I`, lo mismo que la tecla `q` de Miguel) y **Dar órdenes a los
+compañeros…** (`O`). Debajo, bajo la cabecera "Otros", sigue el menú vanilla.
+Mientras haya compañeros IA a la vista, las entradas vanilla "que siga" (`f`)
+y "que vigile" (`g`) se ocultan porque las cubren las órdenes IA; "mover a
+posición" (`G`) se mantiene. El submenú de órdenes se agrupa en Movimiento,
+Objetos y Tareas con cabeceras. Las órdenes que C++ ya sabe ejecutar:
+
+| Entrada | Frase canónica que se envía | Destinatario |
+|---|---|---|
+| Síganme | `Vengan conmigo.` | uno o todos |
+| Vigilen esta posición | `Quedense aqui.` | uno o todos |
+| Entren al edificio | `Todos adentro.` (al llegar dejan de seguirte y vigilan esa casilla; "Síganme" los recupera) | uno o todos |
+| Recoger un objeto… | `Recoge <objeto>.` | uno o todos |
+| Recoger toda la comida | `Recoge toda la comida.` | uno o todos (uno por uno) |
+| Buscar comida | `Busca comida.` (recorre un radio de 10 casillas, atravesando puertas, revisa pilas y contenedores no sellados como neveras, armarios y estantes, y recoge la comida que encuentra; sin modelo; al terminar informa de sitios revisados y de lo recogido por nombre y cantidad) | uno o todos (uno por uno) |
+| Buscar un objeto… | `Busca y trae <objeto>.` (mismo recorrido; el nombre se normaliza a minúsculas sin acentos ni artículos y se exige que todas sus palabras aparezcan en el nombre o id del objeto; se detiene en cuanto tiene el objeto en la mano; informe final igual) | uno o todos (uno por uno) |
+
+Durante el recorrido el compañero deja de seguir al jugador (actitud neutral,
+sin seguir ni vigilar: el seguimiento lo devolvería al jugador y un guardia es
+estacionario y no recoge nada); recupera el modo seguir al emprender la vuelta
+o si otra orden cancela la búsqueda.
+
+Recorrido de ambas búsquedas: antes de dar un paso, el compañero examina todo
+lo que puede desde donde está (pilas a la vista y el contenedor que tenga al
+lado) y recoge lo que coincida; solo camina hacia lo que no puede ver desde
+ahí, eligiendo siempre el sitio pendiente más cercano a su posición actual.
+Cada sitio revisado, inalcanzable o en el que se atascó queda anotado y no se
+vuelve a visitar. Al terminar, el compañero vuelve a seguir al jugador (si
+estaba de guardia deja de estarlo), camina hasta la posición que el jugador
+ocupa en ese momento y da el informe al llegar junto a él (o al acabar esa
+marcha; si tarda más de 600 turnos lo dice donde esté). En "Buscar un
+objeto…" con "Todos", el primer compañero que tiene el objeto en la mano
+cierra la búsqueda de los demás que buscaban lo mismo: todos vuelven al
+jugador y los otros informan de quién lo encontró.
+| Empuñar un objeto… | `Empuna <objeto>.` | uno o todos (uno por uno) |
+| Soltar un objeto… | `Suelta <objeto>.` | uno o todos |
+| Ponerse una prenda… | `Ponte <objeto>.` | uno o todos |
+| Quitarse una prenda… | `Quitate <objeto>.` | uno o todos |
+| Guardar un objeto… | `Guarda <objeto>.` | uno o todos |
+| Recuperar equipo perdido… | `Recupera tu <mochila/arma/casco>.` | uno o todos |
+| Arrastrar a un herido… | `Arrastra a <nombre>.` (el herido se elige de una lista) | uno o todos |
+| Encender fuego | `Haz fuego.` | uno o todos (uno por uno) |
+| Descargar el vehículo | `Descarga el vehiculo.` | uno o todos (uno por uno) |
+| Vigilar un objeto… | `Avisame si ves <objeto>.` | uno o todos (uno por uno) |
+
+Flujo: orden → destinatario (el selector es el mismo de la conversación IA y
+siempre ofrece "todos" cuando hay más de un compañero) → objetivo si hace
+falta (texto libre o lista de compañeros). Las órdenes marcadas "uno por uno"
+no tienen manejador grupal: con "todos", el menú envía la misma frase a cada
+compañero por separado, así que cada uno se comporta igual que si se la
+hubieras dicho a él solo (varios pueden ir al mismo objeto o a la misma
+cocina; el primero que llega lo hace y los demás informan). La
+frase resultante entra por `game::ai_dispatch_player_line`, la misma función
+por la que pasa el texto escrito en la conversación IA, así que el
+comportamiento, los mensajes y el registro son idénticos a haber tecleado la
+frase. El modelo sigue sin decidir nada: para recoger/empuñar puede seguir
+eligiendo el objeto concreto entre candidatos reales, como hoy.
+
+### Qué entradas siguen usando el modelo
+
+Las marcadas "(IA)" en el menú pueden hacer una petición al modelo, igual que
+cuando se escriben:
+
+- **Recoger un objeto…**: si las palabras del jugador nombran exactamente un
+  objeto visible (nombre completo, o una palabra de la orden dentro del nombre
+  o id del objeto), se ejecuta al instante sin petición
+  (`RESOLVER=deterministic_unique_match` en el log de pickup). Con cero o
+  varias coincidencias el modelo elige entre los candidatos reales, como
+  antes. Los objetos con etiqueta de propietario del NPC no usan el atajo:
+  ese flujo pertenece a la recuperación de equipo.
+- **Empuñar un objeto…**: con un solo candidato es determinista; con varios
+  decide el modelo (comportamiento previo, sin cambios).
+- **Vigilar un objeto…**: ya no usa el modelo. Las palabras del jugador,
+  normalizadas (minúsculas, sin acentos, sin relleno), forman un selector
+  `@idlike:` que casa por palabra completa (con tolerancia de plural) contra
+  el nombre visible y el id de cada objeto a la vista; se amplía con los
+  grupos de sinónimos de `data/npc_ai/watch_synonyms.txt` (editable sin
+  recompilar) y con las categorías fijas: "cargador" → `@MAGAZINE`,
+  "munición/balas/cartuchos" → `@AMMO`, "arma de fuego/pistola/rifle/escopeta"
+  → `@GUN`. Una petición de varias palabras ("panel solar") exige todas las
+  palabras en el mismo objeto, en cualquier orden, así "panel de madera" no
+  dispara el aviso. La vigilancia cubre objetos sueltos y también cosas
+  instaladas: piezas de vehículo (un panel solar montado en un coche, una
+  rueda) y muebles (una nevera, un banco de trabajo). El aviso al encontrarlo
+  se muestra en magenta; una sola vez por encargo.
+
+Todas las demás entradas no crean ninguna petición: sus manejadores no llaman
+a `enqueue_*`.
+
+Archivos: `src/npc_ai_order_menu.h/.cpp` (catálogo, frases y textos),
+`src/npctalk.cpp` (`game::ai_orders_menu`, y `ai_talk` refactorizado para
+compartir `ai_dispatch_player_line`; entrada `NPC_CHAT_AI_ORDERS` en
+`game::chat`), `src/game.h`,
+`tests/npc_ai_order_menu_test.cpp` (catálogo cerrado, frases reconocidas por
+cada parser, manejadores de tarea que reclaman su frase),
+`src/npc_ai_pickup.cpp` (atajo determinista por coincidencia única de nombre y
+cola compartida `begin_directed_pickup` para ambas rutas) y
+`tests/npc_ai_equipment_test.cpp` (`npc_ai_pickup_unique_name_match_skips_the_model`).
+
 ## Lo que no cambia
 
 - El modelo nunca decide qué acciones existen ni las ejecuta. Elige una

@@ -1,0 +1,72 @@
+# Sinonimos para la orden "Avisame si ves ..." (vigilancia sin modelo).
+#
+# Una linea = un grupo de palabras equivalentes, separadas por comas.
+# Cuando el jugador usa cualquiera de ellas, el compañero vigila objetos cuyo
+# nombre visible o id interno (en ingles) contenga cualquiera de las demas.
+# Sin acentos ni mayusculas: todo se normaliza antes de comparar.
+# Las lineas que empiezan por # se ignoran.  Se puede ampliar sin recompilar.
+
+guantes, guante, gloves, glove, mitones
+linterna, flashlight, light
+mochila, backpack, rucksack, bolso, macuto
+cuchillo, knife, navaja
+vendas, venda, vendaje, bandage
+pilas, pila, bateria, baterias, battery
+hacha, axe, hatchet
+botas, bota, boots, boot
+radio, walkie
+camiseta, camisa, shirt, tshirt
+agua, water
+martillo, hammer, almadena, sledgehammer
+gafas, lentes, glasses, goggles
+cuerda, soga, rope, cordaje
+comida, alimento, alimentos, food
+medicinas, medicina, medicamentos, medicine, pills, pastillas
+antibioticos, antibiotics
+vendaje, bandage
+casco, helmet
+chaqueta, jacket, coat, abrigo
+pantalones, pantalon, pants, trousers
+zapatos, zapato, shoes, shoe
+llaves, llave, keys, key
+gasolina, gasoline, gas
+diesel, gasoil
+herramientas, herramienta, tools, tool
+destornillador, screwdriver
+alicates, pliers
+sierra, saw
+palanca, crowbar
+cerillas, fosforos, matches
+encendedor, mechero, lighter
+cantimplora, canteen
+botella, bottle
+lata, latas, can, cans
+manta, blanket
+saco de dormir, sleeping bag
+tienda, tent
+mapa, map
+libro, libros, book, books
+revista
+periodico, newspaper
+pistola, pistol, handgun
+rifle, fusil
+escopeta, shotgun
+municion, ammo, ammunition, balas, cartuchos
+cargador, magazine, clip
+flechas, flecha, arrows, arrow
+arco, bow
+ballesta, crossbow
+machete
+espada, sword
+lanza, spear
+bate, bat
+ropa, clothes, clothing
+panel solar, solar panel, solar_panel, placa solar
+rueda, ruedas, wheel, wheels, neumatico
+nevera, frigorifico, refrigerador, fridge, refrigerator
+motor, engine
+mesa de trabajo, banco de trabajo, workbench
+horno, oven, stove, cocina
+cama, bed
+deposito de agua, tanque de agua, water tank
+generador, generator

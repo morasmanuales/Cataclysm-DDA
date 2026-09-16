@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "cata_utility.h"
+#include "catacharset.h"
 #include "item.h"
 #include "item_location.h"
 #include "map.h"
@@ -28,6 +29,7 @@
 #include "rng.h"
 #include "string_formatter.h"
 #include "translations.h"
+#include "unicode.h"
 
 namespace
 {
@@ -47,29 +49,63 @@ struct pickup_candidate {
     bool associated_with_npc = false;
 };
 
+// Lowercase, accents removed, punctuation turned into spaces: the same
+// normalisation the equipment and search orders use, so every "Objetos"
+// order reads the player's words the same way.
+std::string normalize_pickup_text( const std::string &text )
+{
+    std::u32string codepoints = utf8_to_utf32( text );
+    for( char32_t &codepoint : codepoints ) {
+        u32_to_lowercase( codepoint );
+        remove_accent( codepoint );
+    }
+    std::string normalized;
+    bool previous_space = true;
+    for( const char32_t codepoint : codepoints ) {
+        if( ( codepoint >= U'a' && codepoint <= U'z' ) ||
+            ( codepoint >= U'0' && codepoint <= U'9' ) || codepoint == U'_' ) {
+            normalized.push_back( static_cast<char>( codepoint ) );
+            previous_space = false;
+        } else if( codepoint > 127 ) {
+            normalized += utf32_to_utf8( codepoint );
+            previous_space = false;
+        } else if( !previous_space ) {
+            normalized.push_back( ' ' );
+            previous_space = true;
+        }
+    }
+    while( !normalized.empty() && normalized.back() == ' ' ) {
+        normalized.pop_back();
+    }
+    return normalized;
+}
+
 std::size_t pickup_name_match_strength( const std::string &player_line,
                                         const pickup_candidate &candidate )
 {
-    const std::string &plain_name = candidate.name;
-    if( !plain_name.empty() && lcmatch( player_line, plain_name ) ) {
+    const std::string line = normalize_pickup_text( player_line );
+    const std::string plain_name = normalize_pickup_text( candidate.name );
+    const std::string item_id = normalize_pickup_text( candidate.item_id );
+    if( !plain_name.empty() && line.find( plain_name ) != std::string::npos ) {
         return plain_name.size() + 1000;
     }
 
     static const std::unordered_set<std::string> ignored_words = {
-        "agarra", "coge", "coger", "cogela", "cogelo", "el", "ella", "grab",
+        "agarra", "agarren", "coge", "coger", "cogela", "cogelo", "cojan", "el", "ella", "grab",
         "la", "las", "levanta", "levantar", "los", "mi", "mis", "pick", "pickup",
-        "recoge", "recoger", "recogela", "recogelo", "take", "toma", "tomar", "tu",
-        "tus", "un", "una", "up", "your"
+        "recoge", "recoger", "recogela", "recogelo", "recojan", "take", "toma", "tomar", "tu",
+        "tus", "un", "una", "unos", "unas", "up", "your", "the", "del", "de", "que", "hay",
+        "ahi", "alli", "aqui", "suelo", "por", "favor", "ahora", "please", "now", "there"
     };
     std::size_t strongest = 0;
-    for( std::string word : string_split( player_line, ' ' ) ) {
-        word.erase( std::remove_if( word.begin(), word.end(), []( const unsigned char ch ) {
-            return ch < 128 && !std::isalnum( ch ) && ch != '_';
-        } ), word.end() );
+    std::istringstream stream( line );
+    std::string word;
+    while( stream >> word ) {
         if( word.size() < 3 || ignored_words.count( word ) > 0 ) {
             continue;
         }
-        if( lcmatch( plain_name, word ) || lcmatch( candidate.item_id, word ) ) {
+        if( plain_name.find( word ) != std::string::npos ||
+            item_id.find( word ) != std::string::npos ) {
             strongest = std::max( strongest, word.size() );
         }
     }
@@ -321,6 +357,56 @@ const char *acquisition_intent_name( const acquisition_intent intent )
     return "AUTO";
 }
 
+namespace
+{
+
+struct directed_pickup_start {
+    bool started = false;
+    std::string message;
+};
+
+// Shared tail of both resolution paths (deterministic shortcut and model
+// completion): resolve the final destination for the target and hand the
+// physical pickup to the vanilla activity.
+directed_pickup_start begin_directed_pickup( npc &who, const item_location &target,
+        const tripoint_bub_ms &position, const std::string &name,
+        const std::string &player_line, const acquisition_intent classified,
+        std::string intent_source, const char *selection_reason )
+{
+    directed_pickup_start start;
+    if( intent_source.empty() ) {
+        intent_source = "automatic";
+    }
+    const acquisition_intent resolved_intent = resolve_ambiguous_intent_for_target(
+            classified, *target, intent_source );
+
+    const bool generic_capacity = who.can_take_that( *target );
+    add_msg_debug( debugmode::DF_NPC_ITEMAI,
+                   "%s EQUIP_INTENT=PICKUP TARGET_ITEM=%s TARGET_LOCATION=%s SOURCE=ground "
+                   "GENERIC_PICKUP_CAPACITY_CHECK=%s WHY_PICKUP_WAS_SELECTED=%s "
+                   "ACQUISITION_INTENT=%s INTENT_SOURCE=%s",
+                   who.get_name(), name, position.to_string_writable(),
+                   generic_capacity ? "success" : "failure", selection_reason,
+                   acquisition_intent_name( resolved_intent ), intent_source );
+    std::string error;
+    if( !who.ai_request_pickup( target, position, error, true, player_line, resolved_intent,
+                                intent_source ) ) {
+        start.message = string_format( _( "I can't pick up %1$s: %2$s" ), name, error );
+        return start;
+    }
+    start.started = true;
+    start.message = resolved_intent == acquisition_intent::wield ?
+                    string_format( npc_ai::localized_ai_message(
+                                       _( "I'm going to pick up and wield %s." ),
+                                       "Voy a recoger y empuñar %s." ), name ) :
+                    string_format( npc_ai::localized_ai_message(
+                                       _( "I'm going to pick up %s." ),
+                                       "Voy a recoger %s." ), name );
+    return start;
+}
+
+} // namespace
+
 pickup_command_result try_handle_pickup_command(
     npc &who,
     const std::string &player_line
@@ -494,6 +580,39 @@ pickup_command_result try_handle_pickup_command(
         return result;
     }
 
+    // Deterministic shortcut.  When the player's words name exactly one of
+    // the visible candidates (full item name, or a word of the order found in
+    // the item name or id) there is nothing for the model to disambiguate, so
+    // the order executes at once without a request.  Zero or several name
+    // matches still go to the resolver, exactly as before.  Candidates that
+    // only carry this NPC's equipment tag (tier 0) are deliberately excluded:
+    // that flow belongs to equipment recovery and keeps its resolver prompt.
+    std::size_t matching = 0;
+    std::size_t matching_index = 0;
+    for( std::size_t i = 0; i < candidates.size(); ++i ) {
+        if( candidates[i].relevance_tier == 1 || candidates[i].relevance_tier == 2 ) {
+            ++matching;
+            matching_index = i;
+        }
+    }
+    if( matching == 1 ) {
+        pickup_candidate &selected = candidates[matching_index];
+        if( debug ) {
+            debug << "RESOLVER=deterministic_unique_match\n"
+                  << "SELECTED=" << selected.name << "\n";
+        }
+        const directed_pickup_start start = begin_directed_pickup(
+                                                who, selected.location, selected.position, selected.name,
+                                                player_line, classification.intent, classification.source,
+                                                "pickup_unique_name_match" );
+        result.started = start.started;
+        result.message = start.message;
+        if( debug ) {
+            debug << ( start.started ? "RESULT=STARTED\n" : "RESULT=ACTION_REJECTED\n" );
+        }
+        return result;
+    }
+
     const std::string resolver_prompt =
         build_resolver_prompt(
             player_line,
@@ -528,144 +647,6 @@ pickup_command_result try_handle_pickup_command(
     if( !queued.accepted ) {
         result.message = _( "I am still considering your previous request." );
     }
-    return result;
-
-    const ai_response ai = { false, "", "unreachable synchronous resolver" };
-
-    if( !ai.success ) {
-
-        result.message =
-            "No pude determinar que objeto quieres que recoja.";
-
-        if( debug ) {
-            debug
-                << "OLLAMA_SUCCESS=no\n"
-                << "OLLAMA_ERROR="
-                << ai.error
-                << "\n";
-        }
-
-        return result;
-    }
-
-    if( debug ) {
-        debug
-            << "OLLAMA_SUCCESS=yes\n"
-            << "OLLAMA_RESPONSE="
-            << ai.text
-            << "\n";
-    }
-
-    const int selected_index =
-        parse_pickup_index(
-            ai.text
-        );
-
-    if( debug ) {
-        debug
-            << "PARSED_INDEX="
-            << selected_index
-            << "\n";
-    }
-
-    if(
-        selected_index <= 0 ||
-        selected_index >
-        static_cast<int>( candidates.size() )
-    ) {
-
-        result.message =
-            "No encuentro con seguridad el objeto al que te refieres.";
-
-        if( debug ) {
-            debug << "RESULT=NO_SAFE_MATCH\n";
-        }
-
-        return result;
-    }
-
-    pickup_candidate &selected =
-        candidates[
-            static_cast<std::size_t>(
-                selected_index - 1
-            )
-        ];
-
-    if( !selected.location ) {
-
-        result.message =
-            "Ese objeto ya no esta ahi.";
-
-        if( debug ) {
-            debug << "RESULT=TARGET_INVALID\n";
-        }
-
-        return result;
-    }
-
-    if( !who.sees( here, selected.position ) ) {
-
-        result.message =
-            "Ya no puedo ver ese objeto.";
-
-        if( debug ) {
-            debug << "RESULT=TARGET_NOT_VISIBLE\n";
-        }
-
-        return result;
-    }
-
-    std::string action_error;
-
-    const bool started =
-        who.ai_request_pickup(
-            selected.location,
-            selected.position,
-            action_error,
-            true,
-            player_line
-        );
-
-    if( !started ) {
-
-        result.message =
-            std::string( "No puedo recoger " ) +
-            selected.name +
-            ": " +
-            action_error;
-
-        if( debug ) {
-            debug
-                << "RESULT=ACTION_REJECTED\n"
-                << "ERROR="
-                << action_error
-                << "\n";
-        }
-
-        return result;
-    }
-
-    result.started = true;
-
-    result.message =
-        std::string( "Voy a recoger " ) +
-        selected.name +
-        ".";
-
-    if( debug ) {
-        debug
-            << "RESULT=STARTED\n"
-            << "TARGET_ID="
-            << selected.item_id
-            << "\n"
-            << "TARGET_NAME="
-            << selected.name
-            << "\n"
-            << "TARGET_POS="
-            << selected.position.to_string_writable()
-            << "\n";
-    }
-
     return result;
 }
 
@@ -762,33 +743,11 @@ void apply_pickup_ai_completion( npc &who, const ai_request_completion &completi
         return;
     }
 
-    std::string intent_source = completion.request.acquisition_intent_source.empty() ?
-                                "automatic" : completion.request.acquisition_intent_source;
-    const acquisition_intent resolved_intent = resolve_ambiguous_intent_for_target(
-            completion.request.acquisition, *target, intent_source );
-
-    const bool generic_capacity = who.can_take_that( *target );
-    add_msg_debug( debugmode::DF_NPC_ITEMAI,
-                   "%s EQUIP_INTENT=PICKUP TARGET_ITEM=%s TARGET_LOCATION=%s SOURCE=ground "
-                   "GENERIC_PICKUP_CAPACITY_CHECK=%s WHY_PICKUP_WAS_SELECTED=pickup_router "
-                   "ACQUISITION_INTENT=%s INTENT_SOURCE=%s",
-                   who.get_name(), selected.name, position.to_string_writable(),
-                   generic_capacity ? "success" : "failure",
-                   acquisition_intent_name( resolved_intent ), intent_source );
-    std::string error;
-    if( !who.ai_request_pickup( target, position, error, true,
-                                completion.request.player_line, resolved_intent,
-                                intent_source ) ) {
-        speak( string_format( _( "I can't pick up %1$s: %2$s" ), selected.name, error ) );
-        return;
-    }
-    speak( resolved_intent == acquisition_intent::wield ?
-           string_format( npc_ai::localized_ai_message(
-                              _( "I'm going to pick up and wield %s." ),
-                              "Voy a recoger y empuñar %s." ), selected.name ) :
-           string_format( npc_ai::localized_ai_message(
-                              _( "I'm going to pick up %s." ),
-                              "Voy a recoger %s." ), selected.name ) );
+    const directed_pickup_start start = begin_directed_pickup(
+                                            who, target, position, selected.name,
+                                            completion.request.player_line, completion.request.acquisition,
+                                            completion.request.acquisition_intent_source, "pickup_router" );
+    speak( start.message );
 }
 
 } // namespace npc_ai

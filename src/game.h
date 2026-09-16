@@ -83,6 +83,10 @@ class map_item_stack;
 class memorial_logger;
 class monster;
 class npc;
+namespace npc_ai
+{
+struct ai_conversation_selection;
+} // namespace npc_ai
 class npc_template;
 class overmap;
 class save_t;
@@ -991,9 +995,16 @@ class game
 
         void chat(); // Talk to a nearby NPC  'C'
         void ai_talk();
+        // Closed catalogue of companion orders (entry of the chat menu),
+        // executed through the same handlers as a typed AI conversation line.
+        void ai_orders_menu();
         void npc_move_command();
         void ai_talk( const std::vector<npc *> &talkers, const std::string &selection_prompt,
                       bool report_no_available );
+        // Routes one player line (typed or produced by the orders menu) through
+        // the keyword parsers, the intent classifier and finally dialogue.
+        void ai_dispatch_player_line( const npc_ai::ai_conversation_selection &selection,
+                                      const std::string &player_line );
 
         // Internal methods to show "look around" info
         void print_fields_info( const tripoint_bub_ms &lp, const catacurses::window &w_look, int column,

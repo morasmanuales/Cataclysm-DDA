@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <list>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "activity_actor_definitions.h"
 #include "bodypart.h"
 #include "cata_utility.h"
+#include "catacharset.h"
 #include "item.h"
 #include "map.h"
 #include "map_selector.h"
@@ -20,6 +22,7 @@
 #include "npc_ai_goal.h"
 #include "output.h"
 #include "translations.h"
+#include "unicode.h"
 #include "units.h"
 
 namespace
@@ -188,15 +191,118 @@ std::vector<equipment_candidate> collect_candidates( npc &who,
     return result;
 }
 
+// Lowercase, accents removed, punctuation turned into spaces.
+std::string normalize_equipment_text( const std::string &text )
+{
+    std::u32string codepoints = utf8_to_utf32( text );
+    for( char32_t &codepoint : codepoints ) {
+        u32_to_lowercase( codepoint );
+        remove_accent( codepoint );
+    }
+    std::string normalized;
+    bool previous_space = true;
+    for( const char32_t codepoint : codepoints ) {
+        if( ( codepoint >= U'a' && codepoint <= U'z' ) ||
+            ( codepoint >= U'0' && codepoint <= U'9' ) ) {
+            normalized.push_back( static_cast<char>( codepoint ) );
+            previous_space = false;
+        } else if( codepoint > 127 ) {
+            normalized += utf32_to_utf8( codepoint );
+            previous_space = false;
+        } else if( !previous_space ) {
+            normalized.push_back( ' ' );
+            previous_space = true;
+        }
+    }
+    while( !normalized.empty() && normalized.back() == ' ' ) {
+        normalized.pop_back();
+    }
+    return normalized;
+}
+
+// The object words of an equipment order: everything that is not the verb,
+// an article or filler.  "Suelta la esponja ahora" -> { "esponja" }.
+std::vector<std::string> equipment_request_words( const std::string &player_line )
+{
+    static const std::vector<std::string> filler = {
+        // verbs of every equipment order
+        "suelta", "suelten", "soltar", "soltad", "sueltala", "sueltalo", "deja", "dejen", "dejad",
+        "dejate", "tira", "tiren", "tirad", "drop", "ponte", "pontela", "pontelo", "ponertela",
+        "ponerte", "ponganse", "poneos", "vistete", "wear", "put", "on", "quitate", "quitense",
+        "quitaos", "sacate", "take", "off", "remove", "guarda", "guardar", "guarden", "guardad",
+        "enfunda", "holster", "away", "recoge", "recupera", "busca", "retrieve", "recover", "pick",
+        "up", "empuna", "empunar",
+        // articles, pronouns, filler
+        "el", "la", "los", "las", "un", "una", "unos", "unas", "de", "del", "al", "tu", "tus",
+        "su", "sus", "mi", "mis", "ese", "esa", "eso", "esos", "esas", "este", "esta", "esto",
+        "que", "tienes", "llevas", "ahora", "ya", "por", "favor", "urgente", "the", "a", "an",
+        "your", "my", "that", "this", "those", "these", "you", "have", "are", "carrying", "now",
+        "please", "immediately"
+    };
+    std::vector<std::string> words;
+    std::istringstream stream( normalize_equipment_text( player_line ) );
+    std::string word;
+    while( stream >> word ) {
+        if( word.size() < 3 || std::find( filler.begin(), filler.end(), word ) != filler.end() ) {
+            continue;
+        }
+        if( std::find( words.begin(), words.end(), word ) == words.end() ) {
+            words.push_back( word );
+        }
+    }
+    return words;
+}
+
+bool candidate_matches_words( const equipment_candidate &candidate,
+                              const std::vector<std::string> &words )
+{
+    if( words.empty() ) {
+        return false;
+    }
+    const std::string name = normalize_equipment_text( candidate.name );
+    const std::string id = normalize_equipment_text( candidate.id );
+    for( const std::string &word : words ) {
+        if( name.find( word ) == std::string::npos && id.find( word ) == std::string::npos ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool memory_matches_words( const npc_ai::dropped_equipment_memory &record,
+                           const std::vector<std::string> &words )
+{
+    if( words.empty() ) {
+        return false;
+    }
+    const std::string name = normalize_equipment_text( record.item_name );
+    const std::string id = normalize_equipment_text( record.item_type );
+    for( const std::string &word : words ) {
+        if( name.find( word ) == std::string::npos && id.find( word ) == std::string::npos ) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<std::size_t> deterministic_matches( const std::string &player_line,
         const std::vector<equipment_candidate> &candidates )
 {
+    // Three tiers: the whole item name quoted in the order; every object word
+    // of the order found in the item name or id (so "suelta la esponja" finds
+    // "esponja (limpia)" and "drop the bottle" finds "plastic bottle");
+    // finally the coarse categories (pack / weapon / headwear).
     std::vector<std::size_t> exact;
+    std::vector<std::size_t> by_words;
     std::vector<std::size_t> category;
+    const std::vector<std::string> words = equipment_request_words( player_line );
     for( std::size_t index = 0; index < candidates.size(); ++index ) {
         const equipment_candidate &candidate = candidates[index];
         if( lcmatch( player_line, candidate.name ) || lcmatch( player_line, candidate.id ) ) {
             exact.push_back( index );
+        }
+        if( candidate_matches_words( candidate, words ) ) {
+            by_words.push_back( index );
         }
         if( ( asks_for_pack( player_line ) && candidate.pack ) ||
             ( asks_for_weapon( player_line ) && candidate.weapon ) ||
@@ -204,7 +310,13 @@ std::vector<std::size_t> deterministic_matches( const std::string &player_line,
             category.push_back( index );
         }
     }
-    return !exact.empty() ? exact : category;
+    if( !exact.empty() ) {
+        return exact;
+    }
+    if( !by_words.empty() ) {
+        return by_words;
+    }
+    return category;
 }
 
 std::vector<std::size_t> prefer_equipped_target( const npc_ai::equipment_action action,
@@ -249,7 +361,18 @@ std::vector<npc_ai::dropped_equipment_memory> matching_dropped_memories(
     npc &who, const std::string &player_line )
 {
     std::vector<npc_ai::dropped_equipment_memory> exact;
+    std::vector<npc_ai::dropped_equipment_memory> by_words;
     std::vector<npc_ai::dropped_equipment_memory> category;
+    // The generic category words select the family, not a name; drop them so
+    // "recupera tu arma, el hacha" narrows by "hacha" alone.
+    std::vector<std::string> words = equipment_request_words( player_line );
+    words.erase( std::remove_if( words.begin(), words.end(), []( const std::string & word ) {
+        static const std::vector<std::string> generic = {
+            "arma", "weapon", "gun", "mochila", "backpack", "rucksack", "bolso", "macuto",
+            "casco", "helmet", "sombrero", "hat", "equipo", "gear"
+        };
+        return std::find( generic.begin(), generic.end(), word ) != generic.end();
+    } ), words.end() );
     for( const npc_ai::dropped_equipment_memory &record :
          npc_ai::get_dropped_equipment_memories( who ) ) {
         if( record.owner_id != who.getID().get_value() ||
@@ -261,13 +384,22 @@ std::vector<npc_ai::dropped_equipment_memory> matching_dropped_memories(
             lcmatch( player_line, record.item_type ) ) {
             exact.push_back( record );
         }
+        if( memory_matches_words( record, words ) ) {
+            by_words.push_back( record );
+        }
         if( ( asks_for_pack( player_line ) && is_pack( prototype ) ) ||
             ( asks_for_weapon( player_line ) && is_weapon( prototype ) ) ||
             ( asks_for_headwear( player_line ) && is_headwear( prototype ) ) ) {
             category.push_back( record );
         }
     }
-    return !exact.empty() ? exact : category;
+    if( !exact.empty() ) {
+        return exact;
+    }
+    if( !by_words.empty() ) {
+        return by_words;
+    }
+    return category;
 }
 
 npc_ai::equipment_command_result request_remembered_equipment(

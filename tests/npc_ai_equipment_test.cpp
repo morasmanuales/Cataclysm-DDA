@@ -1109,7 +1109,9 @@ TEST_CASE( "npc_ai_acquisition_intent_controls_real_destination_without_losing_t
             get_map().add_item( position, item( itype_bottle_plastic, calendar::turn ) );
 
             const npc_ai::pickup_command_result request = resolve_pickup_command( who, line );
-            REQUIRE( request.pending );
+            // "take the bottle" names the only visible candidate and resolves
+            // deterministically; the Spanish line still needs the resolver.
+            REQUIRE( ( request.pending || request.started ) );
             CHECK( who.ai_directed_pickup_intent == npc_ai::acquisition_intent::store );
             finish_directed_pickup( who );
             CHECK_FALSE( who.get_wielded_item() );
@@ -1718,4 +1720,176 @@ TEST_CASE( "npc_ai_recovery_without_matching_memory_falls_through_to_general_pic
     const npc_ai::equipment_command_result result =
         npc_ai::try_handle_equipment_command( who, "Recoge tu espada." );
     CHECK_FALSE( result.handled );
+}
+
+TEST_CASE( "npc_ai_pickup_unique_name_match_skips_the_model",
+           "[npc_ai][npc_ai_pickup][npc_ai_orders]" )
+{
+    using namespace std::chrono_literals;
+    reset_ai_requests reset;
+    npc_ai::reset_ai_request_system_for_test();
+    npc &who = prepare_equipment_npc();
+    clear_items( 0 );
+    const tripoint_bub_ms position = who.pos_bub( get_map() ) + point::east;
+
+    bool resolver_called = false;
+    npc_ai::set_ai_request_executor_for_test( [&]( const std::string & ) {
+        resolver_called = true;
+        return npc_ai::ai_response{ false, "", "resolver must not run" };
+    }, false );
+    npc_ai::begin_ai_session();
+
+    SECTION( "one visible item whose name is in the order starts at once" ) {
+        get_map().add_item( position, item( itype_fire_ax, calendar::turn ) );
+        get_map().add_item( position, item( itype_bottle_plastic, calendar::turn ) );
+
+        // "toma" is the ambiguous verb: the weapon target resolves it to wield.
+        const npc_ai::pickup_command_result request =
+            npc_ai::try_handle_pickup_command( who, "Toma el fire axe." );
+        REQUIRE( request.handled );
+        CHECK_FALSE( request.pending );
+        CHECK( request.started );
+        CHECK_FALSE( resolver_called );
+        CHECK( npc_ai::get_ai_request_queue().pending_count() == 0 );
+        CHECK( who.ai_directed_pickup );
+        CHECK( who.ai_directed_pickup_intent == npc_ai::acquisition_intent::wield );
+        finish_directed_pickup( who );
+        REQUIRE( who.get_wielded_item() );
+        CHECK( who.get_wielded_item()->typeId() == itype_fire_ax );
+        CHECK( map_item_count_of_type( position, itype_bottle_plastic ) == 1 );
+    }
+
+    SECTION( "two items matching the same words still go to the resolver" ) {
+        get_map().add_item( position, item( itype_fire_ax, calendar::turn ) );
+        get_map().add_item( position + point::east, item( itype_fire_ax, calendar::turn ) );
+
+        const npc_ai::pickup_command_result request =
+            npc_ai::try_handle_pickup_command( who, "Recoge el fire axe." );
+        REQUIRE( request.handled );
+        CHECK( request.pending );
+        CHECK_FALSE( request.started );
+        CHECK( npc_ai::get_ai_request_queue().pending_count() == 1 );
+    }
+
+    SECTION( "no name match at all still goes to the resolver" ) {
+        get_map().add_item( position, item( itype_fire_ax, calendar::turn ) );
+
+        const npc_ai::pickup_command_result request =
+            npc_ai::try_handle_pickup_command( who, "Recoge la linterna." );
+        REQUIRE( request.handled );
+        CHECK( request.pending );
+        CHECK_FALSE( request.started );
+    }
+}
+
+TEST_CASE( "npc_ai_equipment_drop_matches_partial_and_accented_item_names",
+           "[npc_ai][npc_ai_equipment][npc_ai_orders]" )
+{
+    static const itype_id itype_sponge( "sponge" );
+    npc &who = prepare_equipment_npc();
+    wear_backpack( who );
+    const item_location sponge = who.i_add( item( itype_sponge, calendar::turn ) );
+    const item_location bottle = who.i_add( item( itype_bottle_plastic, calendar::turn ) );
+    REQUIRE( sponge );
+    REQUIRE( bottle );
+    const tripoint_bub_ms position = who.pos_bub( get_map() );
+
+    SECTION( "a word of a multi-word name is enough when it is unambiguous" ) {
+        // The order only says "bottle"; the item is a "plastic bottle".
+        const npc_ai::equipment_command_result result =
+            npc_ai::try_handle_equipment_command( who, "Drop the bottle." );
+        REQUIRE( result.handled );
+        CHECK( result.success );
+        CHECK( map_item_count_of_type( position, itype_bottle_plastic ) == 1 );
+        CHECK( owned_item_count_of_type( who, itype_sponge ) == 1 );
+    }
+
+    SECTION( "uppercase, accents and trailing filler do not matter" ) {
+        const npc_ai::equipment_command_result result =
+            npc_ai::try_handle_equipment_command( who, "Suelta la SPÓNGE que tienes, ahora." );
+        REQUIRE( result.handled );
+        CHECK( result.success );
+        CHECK( map_item_count_of_type( position, itype_sponge ) == 1 );
+        CHECK( owned_item_count_of_type( who, itype_bottle_plastic ) == 1 );
+    }
+
+    SECTION( "a word shared by several carried items stays ambiguous" ) {
+        who.i_add( item( itype_id( "bottle_glass" ), calendar::turn ) );
+        const npc_ai::equipment_command_result result =
+            npc_ai::try_handle_equipment_command( who, "Drop the bottle." );
+        REQUIRE( result.handled );
+        CHECK_FALSE( result.success );
+        CHECK( result.message.find( "determin" ) != std::string::npos );
+        CHECK( map_item_count_of_type( position, itype_bottle_plastic ) == 0 );
+    }
+
+    SECTION( "a word that matches nothing carried is refused, not guessed" ) {
+        const npc_ai::equipment_command_result result =
+            npc_ai::try_handle_equipment_command( who, "Suelta la linterna." );
+        REQUIRE( result.handled );
+        CHECK_FALSE( result.success );
+        CHECK( owned_item_count_of_type( who, itype_sponge ) == 1 );
+        CHECK( owned_item_count_of_type( who, itype_bottle_plastic ) == 1 );
+    }
+}
+
+TEST_CASE( "npc_ai_pickup_name_match_ignores_case_and_accents",
+           "[npc_ai][npc_ai_pickup][npc_ai_orders]" )
+{
+    using namespace std::chrono_literals;
+    reset_ai_requests reset;
+    npc_ai::reset_ai_request_system_for_test();
+    npc &who = prepare_equipment_npc();
+    clear_items( 0 );
+    const tripoint_bub_ms position = who.pos_bub( get_map() ) + point::east;
+    get_map().add_item( position, item( itype_fire_ax, calendar::turn ) );
+    get_map().add_item( position, item( itype_bottle_plastic, calendar::turn ) );
+
+    bool resolver_called = false;
+    npc_ai::set_ai_request_executor_for_test( [&]( const std::string & ) {
+        resolver_called = true;
+        return npc_ai::ai_response{ false, "", "resolver must not run" };
+    }, false );
+    npc_ai::begin_ai_session();
+
+    // Accented capitals and a trailing filler still name exactly one item.
+    const npc_ai::pickup_command_result request =
+        npc_ai::try_handle_pickup_command( who, "Toma el FÍRE ÁXE, por favor." );
+    REQUIRE( request.handled );
+    CHECK( request.started );
+    CHECK_FALSE( request.pending );
+    CHECK_FALSE( resolver_called );
+    finish_directed_pickup( who );
+    CHECK( owned_item_count_of_type( who, itype_fire_ax ) == 1 );
+    CHECK( map_item_count_of_type( position, itype_bottle_plastic ) == 1 );
+}
+
+TEST_CASE( "npc_ai_equipment_recovery_narrows_by_item_word_inside_a_category",
+           "[npc_ai][npc_ai_equipment][npc_ai_equipment_memory][npc_ai_orders]" )
+{
+    npc &who = prepare_equipment_npc();
+    // Two remembered weapons dropped in an emergency: an axe and a knife.
+    item_location axe = who.i_add( item( itype_fire_ax, calendar::turn ) );
+    REQUIRE( axe );
+    REQUIRE( npc_ai::execute_equipment_action( who, npc_ai::equipment_action::drop, axe,
+             "combat_emergency", true ).success );
+    who.setpos( get_map(), who.pos_bub() + point( 1, 0 ) );
+    item_location knife = who.i_add( item( itype_knife_hunting, calendar::turn ) );
+    REQUIRE( knife );
+    REQUIRE( npc_ai::execute_equipment_action( who, npc_ai::equipment_action::drop, knife,
+             "combat_emergency", true ).success );
+    REQUIRE( npc_ai::get_dropped_equipment_memories( who ).size() == 2 );
+
+    // The category alone ("weapon") is ambiguous...
+    const npc_ai::equipment_command_result ambiguous =
+        npc_ai::try_handle_equipment_command( who, "Recover your weapon." );
+    CHECK( ambiguous.handled );
+    CHECK_FALSE( ambiguous.success );
+
+    // ...but one word of the item's name settles it, accents and case aside.
+    const npc_ai::equipment_command_result result =
+        npc_ai::try_handle_equipment_command( who, "Recover your weapon, the ÁXE." );
+    REQUIRE( result.handled );
+    CHECK( result.success );
+    CHECK( result.action == npc_ai::equipment_action::recover );
 }

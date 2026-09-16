@@ -188,10 +188,74 @@ TEST_CASE( "interior_group_order_uses_reachable_unique_destinations",
     CHECK( result.assignments[0].second != result.assignments[1].second );
     CHECK( liam.goto_to_this_pos == result.assignments[0].second );
     CHECK( kim.goto_to_this_pos == result.assignments[1].second );
+    CHECK( liam.ai_interior_hold_pos == result.assignments[0].second );
+    CHECK( kim.ai_interior_hold_pos == result.assignments[1].second );
     CHECK( liam.pos_abs() == liam_start );
     CHECK( kim.pos_abs() == kim_start );
     CHECK_FALSE( here.is_outside( here.get_bub( result.assignments[0].second ) ) );
     CHECK_FALSE( here.is_outside( here.get_bub( result.assignments[1].second ) ) );
+}
+
+TEST_CASE( "interior_order_turns_into_a_guard_post_on_arrival",
+           "[npc_ai][npc_ai_conversation][npc_ai_interior][npc_ai_orders]" )
+{
+    prepare_ai_talk_test_map();
+    npc &liam = spawn_follower( point::east, "Liam" );
+    npc &kim = spawn_follower( point::south, "Kim" );
+    map &here = get_map();
+    const tripoint_bub_ms anchor{ 65, 60, 0 };
+    for( const tripoint_bub_ms &tile : here.points_in_radius( anchor, 2, 0 ) ) {
+        here.ter_set( tile, ter_str_id( "t_floor" ) );
+        here.ter_set( tile + tripoint::above, ter_str_id( "t_flat_roof" ) );
+    }
+    here.invalidate_map_cache( 0 );
+    here.build_map_cache( 0, true );
+
+    const npc_ai::interior_order_result result =
+        npc_ai::execute_enter_nearest_reachable_safe_interior( { &liam, &kim } );
+    REQUIRE( result.success );
+    REQUIRE( result.assignments.size() == 2 );
+    const tripoint_abs_ms liam_dest = result.assignments[0].second;
+    REQUIRE( liam.is_following() );
+
+    SECTION( "reaching the assigned interior tile stops the follow and guards it" ) {
+        liam.setpos( here, here.get_bub( liam_dest ) );
+        liam.goto_to_this_pos = std::nullopt;
+        CHECK( npc_ai::on_move_destination_reached( liam, liam_dest ) );
+        CHECK( liam.mission == NPC_MISSION_GUARD_ALLY );
+        CHECK_FALSE( liam.is_following() );
+        CHECK_FALSE( liam.ai_interior_hold_pos.has_value() );
+        // Kim has not arrived: still following, still bound for her tile.
+        CHECK( kim.is_following() );
+        CHECK( kim.ai_interior_hold_pos == result.assignments[1].second );
+    }
+
+    SECTION( "reaching any other tile never turns into a guard post" ) {
+        CHECK_FALSE( npc_ai::on_move_destination_reached( liam, liam.pos_abs() ) );
+        CHECK( liam.is_following() );
+        CHECK( liam.ai_interior_hold_pos == liam_dest );
+    }
+
+    SECTION( "a newer follow order cancels the pending walk and the hold" ) {
+        const npc_ai::tactical_order_result follow =
+            npc_ai::execute_tactical_order( { &liam }, npc_ai::tactical_order::follow );
+        REQUIRE( follow.affected.size() == 1 );
+        CHECK_FALSE( liam.ai_interior_hold_pos.has_value() );
+        CHECK_FALSE( liam.goto_to_this_pos.has_value() );
+        CHECK( liam.is_following() );
+        // Arriving there later by chance changes nothing.
+        CHECK_FALSE( npc_ai::on_move_destination_reached( liam, liam_dest ) );
+        CHECK( liam.is_following() );
+    }
+
+    SECTION( "the guard post is released by the ordinary follow order" ) {
+        liam.setpos( here, here.get_bub( liam_dest ) );
+        REQUIRE( npc_ai::on_move_destination_reached( liam, liam_dest ) );
+        REQUIRE( liam.mission == NPC_MISSION_GUARD_ALLY );
+        npc_ai::execute_tactical_order( { &liam }, npc_ai::tactical_order::follow );
+        CHECK( liam.is_following() );
+        CHECK( liam.mission != NPC_MISSION_GUARD_ALLY );
+    }
 }
 
 TEST_CASE( "interior_order_fails_cleanly_when_no_reachable_interior_exists",
