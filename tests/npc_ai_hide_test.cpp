@@ -597,3 +597,48 @@ TEST_CASE( "hide_order_restores_a_prepare_for_danger_override_exactly",
     CHECK_FALSE( liam.rules.has_flag( ally_rule::close_doors ) );
     CHECK( liam.rules.has_flag( ally_rule::follow_close ) );
 }
+
+TEST_CASE( "follow_me_walks_a_hidden_companion_out_through_the_door",
+           "[npc_ai][npc_ai_hide][npc_ai_orders]" )
+{
+    npc &liam = prepare_hider();
+    map &here = get_map();
+    const tripoint_bub_ms center{ 68, 60, 0 };
+    const tripoint_bub_ms door = build_room( center, 1 );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    const npc_ai::hide_order_result result = npc_ai::execute_hide_order( { &liam } );
+    REQUIRE( result.success );
+    const tripoint_bub_ms dest = here.get_bub( result.assignments[0].second );
+    liam.setpos( here, dest );
+    liam.goto_to_this_pos = std::nullopt;
+    REQUIRE( npc_ai::process_hide( liam ) );
+    REQUIRE( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::hidden );
+    // Shut in: the door was closed on arrival or by the player.
+    here.ter_set( door, ter_t_door_c );
+    rebuild_caches();
+
+    SECTION( "through the AI follow order" ) {
+        npc_ai::execute_tactical_order( { &liam }, npc_ai::tactical_order::follow );
+        CHECK_FALSE( npc_ai::is_hiding( liam ) );
+        CHECK( liam.is_following() );
+        CHECK_FALSE( liam.is_prone() );
+        REQUIRE( liam.goto_to_this_pos.has_value() );
+        CHECK( here.get_bub( *liam.goto_to_this_pos ) == door );
+    }
+
+    SECTION( "through the vanilla follow (attitude set elsewhere)" ) {
+        liam.set_attitude( NPCATT_FOLLOW );
+        liam.set_mission( NPC_MISSION_NULL );
+        CHECK_FALSE( npc_ai::process_hide( liam ) );
+        CHECK_FALSE( npc_ai::is_hiding( liam ) );
+        REQUIRE( liam.goto_to_this_pos.has_value() );
+        CHECK( here.get_bub( *liam.goto_to_this_pos ) == door );
+    }
+
+    SECTION( "guard here does not walk it anywhere" ) {
+        npc_ai::execute_tactical_order( { &liam }, npc_ai::tactical_order::guard );
+        CHECK_FALSE( npc_ai::is_hiding( liam ) );
+        CHECK_FALSE( liam.goto_to_this_pos.has_value() );
+    }
+}

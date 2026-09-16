@@ -20,10 +20,12 @@
 #include "npc_ai_async.h"
 #include "npc_ai_batch_pickup.h"
 #include "npc_ai_context.h"
+#include "npc_ai_debug.h"
 #include "npc_ai_interior.h"
 #include "npctalk.h"
 #include "pathfinding.h"
 #include "point.h"
+#include "string_formatter.h"
 #include "translations.h"
 #include "unicode.h"
 
@@ -63,6 +65,27 @@ std::map<int, hide_state> hideouts;
 int npc_key( const npc &who )
 {
     return who.getID().get_value();
+}
+
+// Runtime trace (CDDA_NPC_AI_DEBUG=1), one line per event, in the user dir.
+void hide_log( const npc &who, const std::string &line )
+{
+    append_debug_line( "npc_ai_hide_v1_runtime.txt",
+                       string_format( "turn=%d npc=%s pos=%s %s", to_turn<int>( calendar::turn ),
+                                      who.get_name(), who.pos_abs().to_string(), line ) );
+}
+
+const char *phase_name( const hide_phase phase )
+{
+    switch( phase ) {
+        case hide_phase::travelling:
+            return "travelling";
+        case hide_phase::hidden:
+            return "hidden";
+        case hide_phase::cornered:
+            return "cornered";
+    }
+    return "?";
 }
 
 std::string normalize_order( const std::string &text )
@@ -486,6 +509,9 @@ void arrive_at_hideout( npc &who, hide_state &state, map &here )
     who.set_guard_pos( state.destination );
     // Flat on the floor: behind a counter or a table nobody sees it.
     lie_down( who );
+    hide_log( who, string_format( "ARRIVED enclosed=%d room_tiles=%zu guard=%d prone=%d",
+                                  state.enclosed ? 1 : 0, state.room.size(),
+                                  who.is_guarding() ? 1 : 0, who.is_prone() ? 1 : 0 ) );
     say_command_reply( who, localized_ai_message( _( "Hidden.  I'm not moving until it's quiet." ),
                        "Escondido.  No me muevo hasta que pase el peligro." ) );
 }
@@ -507,6 +533,12 @@ void send_to_hideout( npc &who, hide_state &state, map &here, const hideout_choi
         who.set_attitude( NPCATT_FOLLOW );
     }
     who.goto_to_this_pos = state.destination;
+    hide_log( who, string_format( "GOTO dest=%s enclosed=%d room_tiles=%zu route_len=%zu "
+                                  "following=%d avoid_doors=%d",
+                                  state.destination.to_string(), state.enclosed ? 1 : 0,
+                                  state.room.size(), route_to( here, who, *choice.tile ).size(),
+                                  who.is_walking_with() ? 1 : 0,
+                                  who.rules.has_flag( ally_rule::avoid_doors ) ? 1 : 0 ) );
     if( who.pos_abs() == state.destination ) {
         arrive_at_hideout( who, state, here );
     }
@@ -548,6 +580,7 @@ void become_cornered( npc &who, hide_state &state, const int now )
         who.set_guard_pos( who.pos_abs() );
     }
     apply_rules( who, state );
+    hide_log( who, "CORNERED forbid_engage lifted" );
 }
 
 } // namespace
@@ -612,6 +645,9 @@ hide_order_result execute_hide_order( const std::vector<npc *> &raw_targets )
 
         const std::vector<tripoint_bub_ms> hostiles = visible_hostiles( *who, here, threat_scan_radius );
         const hideout_choice choice = find_hideout( *who, here, reserved, {}, hostiles );
+        hide_log( *who, string_format( "ORDER hostiles_visible=%zu told_not_to_open_doors=%d result=%s",
+                                       hostiles.size(), told_not_to_open_doors ? 1 : 0,
+                                       !choice.tile ? "NONE" : choice.enclosed ? "ROOM" : "FALLBACK" ) );
         if( !choice.tile ) {
             restore_rules( *who, state );
             continue;
@@ -672,6 +708,13 @@ bool process_hide( npc &who )
     const int now = to_turn<int>( calendar::turn );
 
     if( state.phase == hide_phase::travelling ) {
+        hide_log( who, string_format( "TICK phase=travelling dest=%s dist=%d goto=%d following=%d "
+                                      "guarding=%d prone=%d moves=%d threat=%d hostiles=%zu",
+                                      state.destination.to_string(),
+                                      rl_dist( who.pos_abs(), state.destination ),
+                                      who.goto_to_this_pos ? 1 : 0, who.is_walking_with() ? 1 : 0,
+                                      who.is_guarding() ? 1 : 0, who.is_prone() ? 1 : 0,
+                                      who.get_moves(), static_cast<int>( threat ), hostiles.size() ) );
         // Caught on the way: fight here, resume the walk once it is quiet.
         if( threat == threat_level::contact ) {
             become_cornered( who, state, now );
@@ -691,8 +734,14 @@ bool process_hide( npc &who )
     // Hidden or cornered.  A follow order given through any other path ends
     // the hideout: the companion is walking away with the player anyway.
     if( who.is_following() ) {
-        cancel_hide( who );
+        hide_log( who, "CANCEL reason=following_again" );
+        cancel_hide( who, true );
         return false;
+    }
+    if( threat != threat_level::none || state.phase == hide_phase::cornered ) {
+        hide_log( who, string_format( "TICK phase=%s threat=%d hostiles=%zu quiet_ticks=%d",
+                                      phase_name( state.phase ), static_cast<int>( threat ),
+                                      hostiles.size(), state.quiet_ticks ) );
     }
 
     if( state.phase == hide_phase::hidden ) {
@@ -791,7 +840,7 @@ std::optional<hide_state> hide_state_for( const npc &who )
     return found->second;
 }
 
-void cancel_hide( const npc &who )
+void cancel_hide( const npc &who, const bool step_out )
 {
     const auto found = hideouts.find( npc_key( who ) );
     if( found == hideouts.end() ) {
@@ -803,10 +852,39 @@ void cancel_hide( const npc &who )
     if( companion == nullptr ) {
         return;
     }
+    hide_log( *companion, string_format( "CANCEL phase=%s step_out=%d rules_restored",
+                                         phase_name( state.phase ), step_out ? 1 : 0 ) );
     restore_rules( *companion, state );
     stand_up( *companion );
     if( companion->goto_to_this_pos && *companion->goto_to_this_pos == state.destination ) {
         companion->goto_to_this_pos = std::nullopt;
+    }
+    if( !step_out || !state.enclosed || state.room.count( companion->pos_abs() ) == 0 ) {
+        return;
+    }
+    // Inside the room it hid in: walk to the door nearest the player.  The
+    // walk opens the door on the way and leaves the companion in the doorway,
+    // where the ordinary follow takes over.
+    map &here = get_map();
+    const tripoint_bub_ms player_pos = get_player_character().pos_bub( here );
+    std::optional<tripoint_bub_ms> exit;
+    int best = std::numeric_limits<int>::max();
+    for( const tripoint_abs_ms &abs_tile : state.room ) {
+        const tripoint_bub_ms tile = here.get_bub( abs_tile );
+        for( const tripoint_bub_ms &n : here.points_in_radius( tile, 1, 0 ) ) {
+            if( n == tile || state.room.count( here.get_abs( n ) ) != 0 || !is_door_tile( here, n ) ) {
+                continue;
+            }
+            const int score = rl_dist( n, player_pos ) * 2 + rl_dist( n, companion->pos_bub( here ) );
+            if( score < best ) {
+                best = score;
+                exit = n;
+            }
+        }
+    }
+    if( exit ) {
+        companion->goto_to_this_pos = here.get_abs( *exit );
+        hide_log( *companion, string_format( "STEP_OUT door=%s", exit->to_string() ) );
     }
 }
 

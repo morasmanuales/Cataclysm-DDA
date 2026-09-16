@@ -80,7 +80,12 @@ std::optional<hide_state> hide_state_for( const npc &who );
 
 // End the hideout: restore the combat rules changed by the order.  Does not
 // change the attitude or the mission; the caller (a tactical order) does.
-void cancel_hide( const npc &who );
+// `step_out`: the companion is going back to following.  If it is inside the
+// room it hid in, it first walks to the room's door (opening it): the vanilla
+// follow logic pauses whenever the path to the player is short, so a
+// companion right behind a closed door would otherwise stay put until the
+// player walks away or opens the door.
+void cancel_hide( const npc &who, bool step_out = false );
 
 void reset_all_hideouts();
 

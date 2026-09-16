@@ -118,8 +118,9 @@ tactical_order_result execute_tactical_order( const std::vector<npc *> &targets,
         // companion never turns into a guard later by surprise.
         clear_interior_hold( *target );
         cancel_food_search( *target );
-        // A hidden companion gets its combat rules back with the new order.
-        cancel_hide( *target );
+        // A hidden companion gets its combat rules back with the new order;
+        // "follow" also walks it out of the room it hid in.
+        cancel_hide( *target, result.order == tactical_order::follow );
         if( result.order == tactical_order::guard ) {
             talk_function::assign_guard( *target );
         } else {
