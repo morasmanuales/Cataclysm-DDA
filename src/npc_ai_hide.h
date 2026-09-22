@@ -18,16 +18,24 @@ namespace npc_ai
 // "Escondanse": the companion walks to an enclosed room (walls, closed
 // windows and at least one door), closes the door behind it, stops fighting,
 // lies down (prone: behind a counter or a table it is not seen) and holds
-// that tile.  While hidden it only reacts to a hostile inside the room: at a
-// distance it looks for another hideout (and defends itself if there is
-// none); right next to it, it stands and fights at once, and goes back to
-// hiding after ten quiet turns.  "Vengan conmigo" / "Quedense aqui"
+// that tile.  On the way it runs, never stops to fight (the order is the
+// retreat: even mid-combat it turns and goes, shutting doors behind) and only
+// fights if an enemy keeps it boxed in.  While hidden it only reacts to a
+// hostile inside the room: at a distance it looks for another hideout, and
+// with none it keeps away from the enemies without engaging (evading) until
+// it is exhausted or boxed in, when it turns and fights, saying so; right
+// next to it, it stands and fights at once, and goes back to hiding after ten
+// quiet turns.  "Vengan conmigo" / "Quedense aqui"
 // end the hideout and give the combat rules back.  No model involved.
 
 enum class hide_phase : int {
     travelling,   // walking to the hideout
     hidden,       // holding the tile, engagement forbidden
-    cornered      // no other hideout: self-defence allowed until it is quiet
+    cornered,     // no other hideout: self-defence allowed until it is quiet
+    evading,      // no hideout and enemies in sight: keeps its distance,
+                  // never engages, until exhausted or boxed in (-> cornered)
+    leaving       // follow order received inside the room: walking out to
+                  // the door with door-opening still allowed, then done
 };
 
 struct hide_state {
@@ -50,6 +58,13 @@ struct hide_state {
     int quiet_ticks = 0;
     int relocations = 0;
     int last_relocation_turn = -1;
+    // Travelling: turns without moving.  A companion boxed in by an enemy
+    // it is not allowed to attack stops running and fights after a few.
+    tripoint_abs_ms last_pos;
+    int stuck_ticks = 0;
+    // Evading: turns spent keeping away; a hideout is looked for again every
+    // few of them.
+    int evade_ticks = 0;
 };
 
 struct hide_order_result {
@@ -81,10 +96,12 @@ std::optional<hide_state> hide_state_for( const npc &who );
 // End the hideout: restore the combat rules changed by the order.  Does not
 // change the attitude or the mission; the caller (a tactical order) does.
 // `step_out`: the companion is going back to following.  If it is inside the
-// room it hid in, it first walks to the room's door (opening it): the vanilla
-// follow logic pauses whenever the path to the player is short, so a
-// companion right behind a closed door would otherwise stay put until the
-// player walks away or opens the door.
+// room it hid in, the hideout is not dropped yet: it turns into the `leaving`
+// phase, a walk to the room's door with door-opening kept allowed (the
+// player's "avoid doors" rule would otherwise leave it shut in), and ends when
+// it stands in the doorway or out of the room.  The vanilla follow logic
+// pauses whenever the path to the player is short, so without this a companion
+// right behind a closed door stays put until the player opens it.
 void cancel_hide( const npc &who, bool step_out = false );
 
 void reset_all_hideouts();

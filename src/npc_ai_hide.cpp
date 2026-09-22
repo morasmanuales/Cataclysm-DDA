@@ -51,12 +51,27 @@ constexpr int threat_scan_radius = 10;
 constexpr int relocation_cooldown_turns = 5;
 // Quiet turns before a cornered companion goes back to not fighting.
 constexpr int cornered_quiet_ticks = 10;
+// Turns boxed in next to an enemy without moving before giving up the run.
+constexpr int boxed_in_ticks = 3;
+// Turns without moving and without an enemy in contact before the route is
+// considered broken and the hideout is chosen again from where it stands.
+constexpr int replan_ticks = 6;
+// Safety net for the walk out: after this many turns the rules are restored
+// wherever the companion is.
+constexpr int leaving_timeout_ticks = 30;
+// Evading: how often a hideout is looked for again while keeping away.
+constexpr int evade_replan_ticks = 5;
+// Relocating after being found: the new room has to be a real escape, not the
+// next tile over, and it has to put some ground between them.
+constexpr int relocation_min_distance = 3;
+constexpr int relocation_min_hostile_distance = 6;
 // Visual profile of a prone medium creature (creature.cpp: 120 * 0.275).  An
 // obstacle with more coverage than this, right next to the companion on the
 // line towards the viewer, hides a prone companion completely.
 constexpr int prone_profile = 33;
 
 static const move_mode_id move_mode_prone( "prone" );
+static const move_mode_id move_mode_run( "run" );
 static const efftype_id effect_npc_run_away( "npc_run_away" );
 static const move_mode_id move_mode_walk( "walk" );
 
@@ -84,6 +99,10 @@ const char *phase_name( const hide_phase phase )
             return "hidden";
         case hide_phase::cornered:
             return "cornered";
+        case hide_phase::evading:
+            return "evading";
+        case hide_phase::leaving:
+            return "leaving";
     }
     return "?";
 }
@@ -238,9 +257,18 @@ struct hideout_choice {
 // number of doors and windows and size; the tile inside is the one farthest
 // from the doors.  Without any enclosed room: the reachable interior tile
 // farthest from the visible enemies (nearest one when nothing is in sight).
+// Extra demands on the room chosen, used when running away from something:
+// a hideout one step from here, or one the enemy is already next to, is no
+// escape at all.
+struct hideout_limits {
+    int min_from_origin = 0;
+    int min_from_hostiles = 0;
+};
+
 hideout_choice find_hideout( npc &who, map &here, const std::set<tripoint_abs_ms> &reserved,
                              const std::set<tripoint_abs_ms> &avoid_room,
-                             const std::vector<tripoint_bub_ms> &hostiles )
+                             const std::vector<tripoint_bub_ms> &hostiles,
+                             const hideout_limits &limits = hideout_limits() )
 {
     hideout_choice choice;
     const tripoint_bub_ms origin = who.pos_bub( here );
@@ -347,6 +375,13 @@ hideout_choice find_hideout( npc &who, map &here, const std::set<tripoint_abs_ms
         if( !deepest ) {
             continue;
         }
+        if( limits.min_from_origin > 0 && rl_dist( origin, *deepest ) < limits.min_from_origin ) {
+            continue;
+        }
+        if( limits.min_from_hostiles > 0 && !hostiles.empty() &&
+            min_dist_to( *deepest, hostiles ) < limits.min_from_hostiles ) {
+            continue;
+        }
         const std::vector<tripoint_bub_ms> route = route_to( here, who, *deepest );
         if( route.empty() ) {
             continue;
@@ -438,8 +473,18 @@ void backup_rules( const npc &who, hide_state &state )
 
 // Force the hideout's rules for the current phase.  Called at the order and
 // again every turn, so a vanilla "clear overrides" never sticks.
+void restore_rules( npc &who, const hide_state &state );
+
 void apply_rules( npc &who, const hide_state &state )
 {
+    if( state.phase == hide_phase::leaving ) {
+        // Walking out: the player's rules are back, except that the door
+        // must stay openable until the companion is through it.
+        restore_rules( who, state );
+        who.rules.enable_override( ally_rule::avoid_doors );
+        who.rules.clear_override( ally_rule::avoid_doors );
+        return;
+    }
     for( const forced_rule &forced : hide_rules ) {
         bool value = forced.value;
         if( forced.rule == ally_rule::forbid_engage && state.phase == hide_phase::cornered ) {
@@ -486,8 +531,27 @@ void close_doors_around( npc &who, map &here )
 
 void stand_up( npc &who )
 {
-    if( who.is_prone() ) {
+    if( who.is_prone() || who.is_running() ) {
         who.set_movement_mode( move_mode_walk );
+    }
+}
+
+bool exhausted( const npc &who )
+{
+    return !who.can_run() || who.get_stamina() < who.get_stamina_max() / 4;
+}
+
+// Run while there is breath for it; the vanilla stamina code only slows a
+// runner down, it never switches an NPC back to walking on its own.
+void run_or_walk( npc &who )
+{
+    const bool winded = exhausted( who );
+    if( winded ) {
+        if( who.is_running() || who.is_prone() ) {
+            who.set_movement_mode( move_mode_walk );
+        }
+    } else if( !who.is_running() ) {
+        who.set_movement_mode( move_mode_run );
     }
 }
 
@@ -509,9 +573,10 @@ void arrive_at_hideout( npc &who, hide_state &state, map &here )
     who.set_guard_pos( state.destination );
     // Flat on the floor: behind a counter or a table nobody sees it.
     lie_down( who );
-    hide_log( who, string_format( "ARRIVED enclosed=%d room_tiles=%zu guard=%d prone=%d",
+    hide_log( who, string_format( "ARRIVED enclosed=%d room_tiles=%zu guard=%d prone=%d stamina=%d",
                                   state.enclosed ? 1 : 0, state.room.size(),
-                                  who.is_guarding() ? 1 : 0, who.is_prone() ? 1 : 0 ) );
+                                  who.is_guarding() ? 1 : 0, who.is_prone() ? 1 : 0,
+                                  who.get_stamina() ) );
     say_command_reply( who, localized_ai_message( _( "Hidden.  I'm not moving until it's quiet." ),
                        "Escondido.  No me muevo hasta que pase el peligro." ) );
 }
@@ -525,7 +590,12 @@ void send_to_hideout( npc &who, hide_state &state, map &here, const hideout_choi
     state.enclosed = choice.enclosed;
     state.phase = hide_phase::travelling;
     state.quiet_ticks = 0;
+    state.last_pos = who.pos_abs();
+    state.stuck_ticks = 0;
     stand_up( who );
+    // The order is the retreat: whatever it was doing, it turns and runs.
+    who.remove_effect( effect_npc_run_away );
+    run_or_walk( who );
     if( who.is_guarding() ) {
         talk_function::stop_guard( who );
     }
@@ -581,6 +651,68 @@ void become_cornered( npc &who, hide_state &state, const int now )
     }
     apply_rules( who, state );
     hide_log( who, "CORNERED forbid_engage lifted" );
+}
+
+// No hideout and enemies in sight: keep away from them without engaging.
+// The companion walks (runs) with our own step choice each turn; the vanilla
+// flight cannot be used because with engagement forbidden the threat map it
+// steers by stays empty.
+void begin_evading( npc &who, hide_state &state, const int now )
+{
+    state.phase = hide_phase::evading;
+    state.quiet_ticks = 0;
+    state.evade_ticks = 0;
+    state.stuck_ticks = 0;
+    state.last_pos = who.pos_abs();
+    state.last_relocation_turn = now;
+    stand_up( who );
+    if( who.is_guarding() ) {
+        talk_function::stop_guard( who );
+    }
+    if( !who.is_walking_with() ) {
+        who.set_attitude( NPCATT_FOLLOW );
+    }
+    who.remove_effect( effect_npc_run_away );
+    run_or_walk( who );
+    apply_rules( who, state );
+    hide_log( who, "EVADING keeping away, engagement forbidden" );
+}
+
+// One evasion step: the adjacent tile (or the current one) farthest from the
+// nearest visible enemy; ties go to the tile nearer the player, then to one
+// under a roof.  Returns false when no tile beats standing still.
+bool evade_step( npc &who, map &here, const std::vector<tripoint_bub_ms> &hostiles )
+{
+    const tripoint_bub_ms origin = who.pos_bub( here );
+    const tripoint_bub_ms player_pos = get_player_character().pos_bub( here );
+    const auto nearest_enemy = [&]( const tripoint_bub_ms & tile ) {
+        int best = std::numeric_limits<int>::max();
+        for( const tripoint_bub_ms &hostile : hostiles ) {
+            best = std::min( best, rl_dist( tile, hostile ) );
+        }
+        return best;
+    };
+    const auto score = [&]( const tripoint_bub_ms & tile ) {
+        return nearest_enemy( tile ) * 100 - rl_dist( tile, player_pos ) * 2 +
+               ( here.is_outside( tile ) ? 0 : 1 );
+    };
+    tripoint_bub_ms best = origin;
+    int best_score = score( origin );
+    for( const tripoint_bub_ms &n : here.points_in_radius( origin, 1, 0 ) ) {
+        if( n == origin || !who.can_move_to( n, true ) || g->is_dangerous_tile( n ) ) {
+            continue;
+        }
+        const int n_score = score( n );
+        if( n_score > best_score ) {
+            best = n;
+            best_score = n_score;
+        }
+    }
+    if( best == origin ) {
+        return false;
+    }
+    who.goto_to_this_pos = here.get_abs( best );
+    return true;
 }
 
 } // namespace
@@ -649,7 +781,23 @@ hide_order_result execute_hide_order( const std::vector<npc *> &raw_targets )
                                        hostiles.size(), told_not_to_open_doors ? 1 : 0,
                                        !choice.tile ? "NONE" : choice.enclosed ? "ROOM" : "FALLBACK" ) );
         if( !choice.tile ) {
-            restore_rules( *who, state );
+            if( hostiles.empty() ) {
+                restore_rules( *who, state );
+                continue;
+            }
+            // Nowhere to go and an enemy in sight: standing there doing
+            // nothing is the one wrong answer.  Keep away from them without
+            // engaging, looking for a hideout as it goes; it only turns to
+            // fight when exhausted or boxed in.
+            state.destination = who->pos_abs();
+            state.enclosed = false;
+            begin_evading( *who, state, to_turn<int>( calendar::turn ) );
+            hideouts[npc_key( *who )] = state;
+            result.assignments.emplace_back( who->getID().get_value(), state.destination );
+            ++result.fallback_count;
+            say_command_reply( *who, localized_ai_message(
+                                   _( "Nowhere to hide.  I'll keep away from them." ),
+                                   "No tengo dónde esconderme.  Me alejo de ellos." ) );
             continue;
         }
         reserved.insert( here.get_abs( *choice.tile ) );
@@ -709,24 +857,153 @@ bool process_hide( npc &who )
 
     if( state.phase == hide_phase::travelling ) {
         hide_log( who, string_format( "TICK phase=travelling dest=%s dist=%d goto=%d following=%d "
-                                      "guarding=%d prone=%d moves=%d threat=%d hostiles=%zu",
+                                      "guarding=%d running=%d stamina=%d stuck=%d moves=%d threat=%d "
+                                      "hostiles=%zu panic=%d",
                                       state.destination.to_string(),
                                       rl_dist( who.pos_abs(), state.destination ),
                                       who.goto_to_this_pos ? 1 : 0, who.is_walking_with() ? 1 : 0,
-                                      who.is_guarding() ? 1 : 0, who.is_prone() ? 1 : 0,
-                                      who.get_moves(), static_cast<int>( threat ), hostiles.size() ) );
-        // Caught on the way: fight here, resume the walk once it is quiet.
-        if( threat == threat_level::contact ) {
-            become_cornered( who, state, now );
-            say_command_reply( who, localized_ai_message( _( "It's on me!  I'll defend myself!" ),
-                               "¡Lo tengo encima!  ¡Me defiendo!" ) );
-            return true;
-        }
+                                      who.is_guarding() ? 1 : 0, who.is_running() ? 1 : 0,
+                                      who.get_stamina(), state.stuck_ticks, who.get_moves(),
+                                      static_cast<int>( threat ), hostiles.size(),
+                                      who.has_effect( effect_npc_run_away ) ? 1 : 0 ) );
         if( who.pos_abs() == state.destination ) {
             arrive_at_hideout( who, state, here );
-        } else if( !who.goto_to_this_pos ) {
+            return true;
+        }
+        // The hideout IS the flight: the vanilla panic would pick its own
+        // direction and drop the walk.  Keep running our way instead.
+        who.remove_effect( effect_npc_run_away );
+        run_or_walk( who );
+        if( who.pos_abs() == state.last_pos ) {
+            ++state.stuck_ticks;
+        } else {
+            state.stuck_ticks = 0;
+            state.last_pos = who.pos_abs();
+        }
+        // Boxed in by an enemy it is not allowed to attack: fight through it,
+        // resume the run once it is quiet.
+        if( threat == threat_level::contact && state.stuck_ticks >= boxed_in_ticks ) {
+            become_cornered( who, state, now );
+            say_command_reply( who, localized_ai_message( _( "I can't get past!  I'll defend myself!" ),
+                               "¡No puedo pasar!  ¡Me defiendo!" ) );
+            return true;
+        }
+        if( state.stuck_ticks >= replan_ticks ) {
+            // Not moving and nobody in contact: the route is broken (a door
+            // that will not open, a blocked corridor).  Choose again from
+            // here; failing that, hide where it stands.
+            const hideout_choice again = find_hideout( who, here, {}, {}, hostiles );
+            hide_log( who, string_format( "REPLAN result=%s", !again.tile ? "NONE" :
+                                          again.enclosed ? "ROOM" : "FALLBACK" ) );
+            if( again.tile && here.get_abs( *again.tile ) != state.destination ) {
+                send_to_hideout( who, state, here, again );
+            } else if( !hostiles.empty() ) {
+                begin_evading( who, state, now );
+                say_command_reply( who, localized_ai_message(
+                                       _( "I can't get there.  I'll keep away from them." ),
+                                       "No consigo llegar.  Me alejo de ellos." ) );
+            } else {
+                hideout_choice here_choice;
+                here_choice.tile = who.pos_bub( here );
+                here_choice.enclosed = false;
+                send_to_hideout( who, state, here, here_choice );
+                say_command_reply( who, localized_ai_message( _( "I can't get there.  I'll hide here." ),
+                                   "No consigo llegar.  Me escondo aquí." ) );
+            }
+            return true;
+        }
+        if( !who.goto_to_this_pos ) {
             // Something (an activity, a scare) dropped the walk: resume it.
             who.goto_to_this_pos = state.destination;
+        }
+        return true;
+    }
+
+    if( state.phase == hide_phase::leaving ) {
+        const bool at_door = who.pos_abs() == state.destination;
+        const bool out_of_room = state.room.count( who.pos_abs() ) == 0;
+        ++state.quiet_ticks;
+        hide_log( who, string_format( "TICK phase=leaving door=%s at_door=%d out=%d goto=%d ticks=%d",
+                                      state.destination.to_string(), at_door ? 1 : 0,
+                                      out_of_room ? 1 : 0, who.goto_to_this_pos ? 1 : 0,
+                                      state.quiet_ticks ) );
+        if( at_door || out_of_room || state.quiet_ticks >= leaving_timeout_ticks ||
+            !who.is_following() ) {
+            hide_log( who, "LEFT rules_restored" );
+            restore_rules( who, state );
+            if( who.goto_to_this_pos && *who.goto_to_this_pos == state.destination ) {
+                who.goto_to_this_pos = std::nullopt;
+            }
+            hideouts.erase( found );
+            return false;
+        }
+        if( !who.goto_to_this_pos ) {
+            who.goto_to_this_pos = state.destination;
+        }
+        return true;
+    }
+
+    if( state.phase == hide_phase::evading ) {
+        ++state.evade_ticks;
+        who.remove_effect( effect_npc_run_away );
+        if( who.pos_abs() == state.last_pos ) {
+            ++state.stuck_ticks;
+        } else {
+            state.stuck_ticks = 0;
+            state.last_pos = who.pos_abs();
+        }
+        const bool moved_away = !hostiles.empty() && evade_step( who, here, hostiles );
+        hide_log( who, string_format( "TICK phase=evading hostiles=%zu threat=%d moved=%d stuck=%d "
+                                      "stamina=%d quiet=%d",
+                                      hostiles.size(), static_cast<int>( threat ), moved_away ? 1 : 0,
+                                      state.stuck_ticks, who.get_stamina(), state.quiet_ticks ) );
+        // Out of breath: it cannot keep this up.  Turn and fight, and say so.
+        if( !hostiles.empty() && exhausted( who ) ) {
+            become_cornered( who, state, now );
+            say_command_reply( who, localized_ai_message(
+                                   _( "I'm exhausted, I can't run any more.  I'll defend myself!" ),
+                                   "Estoy agotado, no puedo seguir corriendo.  ¡Me defiendo!" ) );
+            return true;
+        }
+        // Boxed in: an enemy in contact and no tile that takes it farther.
+        if( threat == threat_level::contact && !moved_away && state.stuck_ticks >= boxed_in_ticks ) {
+            become_cornered( who, state, now );
+            say_command_reply( who, localized_ai_message( _( "I'm cornered!  I'll defend myself!" ),
+                               "¡Me han acorralado!  ¡Me defiendo!" ) );
+            return true;
+        }
+        run_or_walk( who );
+        if( hostiles.empty() ) {
+            who.goto_to_this_pos = std::nullopt;
+            if( ++state.quiet_ticks < cornered_quiet_ticks ) {
+                return true;
+            }
+        } else {
+            state.quiet_ticks = 0;
+            if( state.evade_ticks % evade_replan_ticks != 0 ) {
+                return true;
+            }
+        }
+        // Quiet for a while, or a periodic look around: is there a hideout now?
+        const hideout_choice again = find_hideout( who, here, {}, {}, hostiles );
+        if( again.tile && ( again.enclosed || hostiles.empty() ) &&
+            here.get_abs( *again.tile ) != who.pos_abs() ) {
+            say_command_reply( who, hostiles.empty() ?
+                               localized_ai_message( _( "Lost them.  Off to a hideout." ),
+                                                     "Los he perdido de vista.  Voy a esconderme." ) :
+                               localized_ai_message( _( "There!  I can hide there." ),
+                                                     "¡Ahí!  Ahí puedo esconderme." ) );
+            send_to_hideout( who, state, here, again );
+            return true;
+        }
+        if( hostiles.empty() ) {
+            // Lost them and nothing better around: hide where it stands.
+            hideout_choice here_choice;
+            here_choice.tile = who.pos_bub( here );
+            here_choice.enclosed = false;
+            say_command_reply( who, localized_ai_message( _( "Lost them.  I'll hide here." ),
+                               "Los he perdido de vista.  Me escondo aquí." ) );
+            send_to_hideout( who, state, here, here_choice );
         }
         return true;
     }
@@ -736,7 +1013,8 @@ bool process_hide( npc &who )
     if( who.is_following() ) {
         hide_log( who, "CANCEL reason=following_again" );
         cancel_hide( who, true );
-        return false;
+        // Inside the room the hideout lives on as the walk out (leaving).
+        return hideouts.count( npc_key( who ) ) != 0;
     }
     if( threat != threat_level::none || state.phase == hide_phase::cornered ) {
         hide_log( who, string_format( "TICK phase=%s threat=%d hostiles=%zu quiet_ticks=%d",
@@ -756,35 +1034,49 @@ bool process_hide( npc &who )
             }
             return true;
         }
+        // Found out.  The answer is another room, even with the enemy right
+        // next to it: the rooms worth hiding in are small, so an intruder is
+        // in contact the moment it steps through the door, and staying put
+        // would mean never relocating at all.
+        const bool cooling_down = threat != threat_level::contact &&
+                                  state.last_relocation_turn >= 0 &&
+                                  now - state.last_relocation_turn < relocation_cooldown_turns;
+        if( !cooling_down ) {
+            std::set<tripoint_abs_ms> avoid = state.room;
+            avoid.insert( state.destination );
+            hideout_limits limits;
+            limits.min_from_origin = relocation_min_distance;
+            limits.min_from_hostiles = relocation_min_hostile_distance;
+            const hideout_choice next = find_hideout( who, here, {}, avoid, hostiles, limits );
+            hide_log( who, string_format( "FOUND_OUT threat=%d hostiles=%zu relocate=%s",
+                                          static_cast<int>( threat ), hostiles.size(),
+                                          next.tile && next.enclosed ? "ROOM" : "NONE" ) );
+            if( next.tile && next.enclosed ) {
+                say_command_reply( who, localized_ai_message(
+                                       _( "They've found me!  Running to another room." ),
+                                       "¡Me han encontrado!  Corro a otra habitación." ) );
+                ++state.relocations;
+                state.last_relocation_turn = now;
+                send_to_hideout( who, state, here, next );
+                return true;
+            }
+        } else if( threat != threat_level::contact ) {
+            // Just relocated: give the walk a few turns before trying again.
+            return true;
+        }
         if( threat == threat_level::contact ) {
-            // Adjacent: running would only expose its back.
+            // Nowhere to run to and it is already on top of the companion.
             become_cornered( who, state, now );
             say_command_reply( who, localized_ai_message( _( "It's on me!  I'll defend myself!" ),
                                "¡Lo tengo encima!  ¡Me defiendo!" ) );
             return true;
         }
-        if( state.last_relocation_turn >= 0 &&
-            now - state.last_relocation_turn < relocation_cooldown_turns ) {
-            return true;
-        }
-        // An intruder in the room, still at a distance: another hideout,
-        // away from this room and from the enemies.
-        std::set<tripoint_abs_ms> avoid = state.room;
-        avoid.insert( state.destination );
-        const hideout_choice next = find_hideout( who, here, {}, avoid, hostiles );
-        if( next.tile && next.enclosed ) {
-            say_command_reply( who, localized_ai_message(
-                                   _( "They've found me!  Looking for another hideout." ),
-                                   "¡Me han encontrado!  Busco otro escondite." ) );
-            ++state.relocations;
-            state.last_relocation_turn = now;
-            send_to_hideout( who, state, here, next );
-            return true;
-        }
-        // Nowhere better: fight back from here until it is quiet again.
-        become_cornered( who, state, now );
-        say_command_reply( who, localized_ai_message( _( "Nowhere to go.  I'll defend myself!" ),
-                           "No tengo adónde ir.  ¡Me defiendo!" ) );
+        // Nowhere better: get away from it without engaging; it fights only
+        // once exhausted or boxed in.
+        begin_evading( who, state, now );
+        say_command_reply( who, localized_ai_message(
+                               _( "They've found me and there's nowhere else.  I'll keep away." ),
+                               "¡Me han encontrado y no hay otro sitio!  Me alejo." ) );
         return true;
     }
 
@@ -801,6 +1093,8 @@ bool process_hide( npc &who )
         !route_to( here, who, here.get_bub( state.destination ) ).empty() ) {
         // Caught on the way there: finish the walk.
         state.phase = hide_phase::travelling;
+        state.last_pos = who.pos_abs();
+        state.stuck_ticks = 0;
         if( who.is_guarding() ) {
             talk_function::stop_guard( who );
         }
@@ -808,9 +1102,18 @@ bool process_hide( npc &who )
             who.set_attitude( NPCATT_FOLLOW );
         }
         who.goto_to_this_pos = state.destination;
+        run_or_walk( who );
         apply_rules( who, state );
         say_command_reply( who, localized_ai_message( _( "Quiet again.  Back to the hideout." ),
                            "Vuelve a estar tranquilo.  Sigo hacia el escondite." ) );
+        return true;
+    }
+    // Nowhere to resume: is there a proper hideout now that it is quiet?
+    const hideout_choice again = find_hideout( who, here, {}, {}, hostiles );
+    if( again.tile && again.enclosed && here.get_abs( *again.tile ) != who.pos_abs() ) {
+        say_command_reply( who, localized_ai_message( _( "Quiet again.  Off to a hideout." ),
+                           "Vuelve a estar tranquilo.  Voy a esconderme." ) );
+        send_to_hideout( who, state, here, again );
         return true;
     }
     state.phase = hide_phase::hidden;
@@ -847,24 +1150,29 @@ void cancel_hide( const npc &who, const bool step_out )
         return;
     }
     hide_state state = found->second;
-    hideouts.erase( found );
     npc *companion = g->find_npc( who.getID() );
     if( companion == nullptr ) {
+        hideouts.erase( found );
         return;
     }
-    hide_log( *companion, string_format( "CANCEL phase=%s step_out=%d rules_restored",
-                                         phase_name( state.phase ), step_out ? 1 : 0 ) );
-    restore_rules( *companion, state );
+    const bool inside_room = step_out && state.enclosed && state.phase != hide_phase::leaving &&
+                             state.room.count( companion->pos_abs() ) != 0;
+    hide_log( *companion, string_format( "CANCEL phase=%s step_out=%d inside_room=%d",
+                                         phase_name( state.phase ), step_out ? 1 : 0,
+                                         inside_room ? 1 : 0 ) );
     stand_up( *companion );
     if( companion->goto_to_this_pos && *companion->goto_to_this_pos == state.destination ) {
         companion->goto_to_this_pos = std::nullopt;
     }
-    if( !step_out || !state.enclosed || state.room.count( companion->pos_abs() ) == 0 ) {
+    if( !inside_room ) {
+        restore_rules( *companion, state );
+        hideouts.erase( found );
         return;
     }
     // Inside the room it hid in: walk to the door nearest the player.  The
     // walk opens the door on the way and leaves the companion in the doorway,
-    // where the ordinary follow takes over.
+    // where the ordinary follow takes over.  Door-opening stays allowed until
+    // then (see apply_rules for the leaving phase).
     map &here = get_map();
     const tripoint_bub_ms player_pos = get_player_character().pos_bub( here );
     std::optional<tripoint_bub_ms> exit;
@@ -882,10 +1190,23 @@ void cancel_hide( const npc &who, const bool step_out )
             }
         }
     }
-    if( exit ) {
-        companion->goto_to_this_pos = here.get_abs( *exit );
-        hide_log( *companion, string_format( "STEP_OUT door=%s", exit->to_string() ) );
+    if( !exit ) {
+        restore_rules( *companion, state );
+        hideouts.erase( found );
+        return;
     }
+    hide_state &kept = found->second;
+    kept.phase = hide_phase::leaving;
+    kept.destination = here.get_abs( *exit );
+    kept.quiet_ticks = 0;
+    apply_rules( *companion, kept );
+    companion->goto_to_this_pos = kept.destination;
+    // Right next to a shut door: open it now, the follow needs no walk then.
+    if( rl_dist( companion->pos_bub( here ), *exit ) <= 1 && !here.passable( *exit ) &&
+        here.open_door( *companion, *exit, true, true ) ) {
+        here.open_door( *companion, *exit, true );
+    }
+    hide_log( *companion, string_format( "STEP_OUT door=%s", here.get_abs( *exit ).to_string() ) );
 }
 
 void reset_all_hideouts()
