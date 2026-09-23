@@ -117,6 +117,16 @@ bool mentions_either( const std::string &text, const std::string &english,
     return text.find( english ) != std::string::npos || text.find( spanish ) != std::string::npos;
 }
 
+// The companion leaves an open door alone for a couple of turns before it
+// walks over to shut it; tests have to let those turns go by.
+void pass_door_wait( npc &who )
+{
+    for( int i = 0; i < 3; ++i ) {
+        CHECK( npc_ai::process_hide( who ) );
+        calendar::turn += 1_turns;
+    }
+}
+
 bool inside( const tripoint_bub_ms &p, const tripoint_bub_ms &center, const int half )
 {
     return std::abs( p.x() - center.x() ) <= half && std::abs( p.y() - center.y() ) <= half;
@@ -192,7 +202,9 @@ TEST_CASE( "hide_order_picks_the_deepest_tile_of_an_enclosed_room_and_forbids_fi
         CHECK( liam.rules.has_flag( ally_rule::forbid_engage ) );
         CHECK( liam.is_prone() );
 
-        // Nothing around: keeps holding, turn after turn.
+        // Nothing around and the door shut: keeps holding, turn after turn.
+        here.ter_set( door, ter_t_door_c );
+        rebuild_caches();
         for( int i = 0; i < 5; ++i ) {
             CHECK( npc_ai::process_hide( liam ) );
         }
@@ -354,18 +366,32 @@ TEST_CASE( "hidden_companion_relocates_when_an_enemy_enters_and_fights_when_corn
         CHECK( said_either( "another room", "otra habitación" ) );
     }
 
-    SECTION( "an enemy next to it with no other room left means fighting" ) {
+    SECTION( "an enemy next to it with no other room left still leaves the room" ) {
+        // Nowhere to relocate to, but being next to something is not being
+        // cornered: it gets out and keeps away instead of trading blows.
         spawn_test_monster( "mon_zombie", second_center );
         monster &intruder = spawn_test_monster( "mon_zombie", dest + point::west );
         REQUIRE( liam.sees( here, intruder ) );
+        const int intruder_hp = intruder.get_hp();
+        const tripoint_bub_ms start = liam.pos_bub( here );
         Messages::clear_messages();
         CHECK( npc_ai::process_hide( liam ) );
-        REQUIRE( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::cornered );
-        CHECK( npc_ai::hide_state_for( liam )->relocations == 0 );
-        CHECK( liam.mission == NPC_MISSION_GUARD_ALLY );
-        CHECK_FALSE( liam.rules.has_flag( ally_rule::forbid_engage ) );
+        REQUIRE( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::evading );
+        CHECK( liam.rules.has_flag( ally_rule::forbid_engage ) );
         CHECK_FALSE( liam.is_prone() );
-        CHECK( said_either( "It's on me", "Lo tengo encima" ) );
+        CHECK( said_either( "keep away", "Me alejo" ) );
+
+        // And the next turn it is the order that moves it, away from the
+        // intruder, without a single swing.
+        CHECK( npc_ai::process_hide( liam ) );
+        CHECK( npc_ai::hide_took_turn( liam ) );
+        CHECK( liam.pos_bub( here ) != start );
+        // Backed against the far wall it can only sidestep, so the gap may
+        // not grow on this turn; what matters is that it moves and does not
+        // swing.
+        CHECK( rl_dist( liam.pos_bub( here ), intruder.pos_bub( here ) ) >=
+               rl_dist( start, intruder.pos_bub( here ) ) );
+        CHECK( intruder.get_hp() == intruder_hp );
     }
 
     SECTION( "the new room is a real escape, never the next tile over" ) {
@@ -535,6 +561,9 @@ TEST_CASE( "hidden_companion_shrugs_off_the_vanilla_panic_when_nothing_is_in_the
     REQUIRE( npc_ai::process_hide( liam ) );
     REQUIRE( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::hidden );
 
+    // With the door shut there is nothing to do but lie there.
+    here.ter_set( door, ter_t_door_c );
+    rebuild_caches();
     liam.add_effect( efftype_id( "npc_run_away" ), 20_turns );
     REQUIRE( liam.has_effect( efftype_id( "npc_run_away" ) ) );
     CHECK( npc_ai::process_hide( liam ) );
@@ -566,7 +595,14 @@ TEST_CASE( "companion_caught_on_the_way_keeps_running_and_only_fights_when_boxed
 
     REQUIRE( liam.sees( here, zombie ) );
     Messages::clear_messages();
-    // Adjacent enemy: still running, for a couple of turns without moving...
+    // Walled in on every side but the zombie's: it cannot get away.
+    for( const tripoint_bub_ms &n : here.points_in_radius( liam.pos_bub( here ), 1, 0 ) ) {
+        if( n != liam.pos_bub( here ) && n != zombie.pos_bub( here ) ) {
+            here.ter_set( n, ter_t_wall );
+        }
+    }
+    rebuild_caches();
+    // Adjacent enemy and nowhere to step: still running, for a couple of turns...
     for( int i = 0; i < 2; ++i ) {
         liam.add_effect( efftype_id( "npc_run_away" ), 20_turns );
         CHECK( npc_ai::process_hide( liam ) );
@@ -581,8 +617,14 @@ TEST_CASE( "companion_caught_on_the_way_keeps_running_and_only_fights_when_boxed
     CHECK_FALSE( liam.is_running() );
     CHECK( said_either( "can't get past", "No puedo pasar" ) );
 
-    // Quiet again: back on the run to the same hideout.
+    // Quiet again: the walls come down and it resumes the run to the hideout.
     clear_creatures();
+    for( const tripoint_bub_ms &n : here.points_in_radius( liam.pos_bub( here ), 1, 0 ) ) {
+        if( here.ter( n ) == ter_t_wall ) {
+            here.ter_set( n, ter_t_floor );
+        }
+    }
+    rebuild_caches();
     for( int i = 0; i < 9; ++i ) {
         CHECK( npc_ai::process_hide( liam ) );
     }
@@ -763,14 +805,17 @@ TEST_CASE( "hide_order_with_nowhere_to_go_keeps_away_and_fights_only_when_exhaus
     CHECK_FALSE( liam.is_guarding() );
     CHECK( said_either( "keep away", "Me alejo" ) );
 
-    SECTION( "each turn it steps to the tile farthest from the enemy" ) {
+    SECTION( "each turn it steps away from the enemy, spending its own turn" ) {
+        const tripoint_bub_ms start = liam.pos_bub( here );
+        const int start_gap = rl_dist( start, zombie.pos_bub( here ) );
+        const int zombie_hp = zombie.get_hp();
         CHECK( npc_ai::process_hide( liam ) );
         CHECK( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::evading );
-        REQUIRE( liam.goto_to_this_pos.has_value() );
-        const tripoint_bub_ms step = here.get_bub( *liam.goto_to_this_pos );
-        CHECK( rl_dist( step, liam.pos_bub( here ) ) == 1 );
-        CHECK( rl_dist( step, zombie.pos_bub( here ) ) > rl_dist( liam.pos_bub( here ),
-                zombie.pos_bub( here ) ) );
+        // The order moves it itself: an ordinary turn would swing instead.
+        CHECK( npc_ai::hide_took_turn( liam ) );
+        CHECK( rl_dist( liam.pos_bub( here ), start ) == 1 );
+        CHECK( rl_dist( liam.pos_bub( here ), zombie.pos_bub( here ) ) > start_gap );
+        CHECK( zombie.get_hp() == zombie_hp );
         CHECK( liam.rules.has_flag( ally_rule::forbid_engage ) );
     }
 
@@ -882,4 +927,237 @@ TEST_CASE( "follow_me_opens_a_shut_door_right_next_to_the_hidden_companion",
     CHECK( here.ter( door ) == ter_t_door_o );
     REQUIRE( npc_ai::hide_state_for( liam ) );
     CHECK( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::leaving );
+}
+
+TEST_CASE( "hide_order_given_mid_fight_breaks_off_and_runs",
+           "[npc_ai][npc_ai_hide][npc_ai_orders]" )
+{
+    npc &liam = prepare_hider();
+    map &here = get_map();
+    // A room well away, and a zombie already trading blows with the companion.
+    const tripoint_bub_ms center{ 71, 60, 0 };
+    const tripoint_bub_ms door = build_room( center, 1 );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    monster &zombie = spawn_test_monster( "mon_zombie", liam.pos_bub( here ) + point::east );
+    REQUIRE( liam.sees( here, zombie ) );
+    const int zombie_hp = zombie.get_hp();
+    const tripoint_bub_ms start = liam.pos_bub( here );
+
+    const npc_ai::hide_order_result result = npc_ai::execute_hide_order( { &liam } );
+    REQUIRE( result.success );
+    const std::optional<npc_ai::hide_state> state = npc_ai::hide_state_for( liam );
+    REQUIRE( state );
+    // It must actually go somewhere: the tile it is fighting on is no hideout.
+    CHECK( state->phase == npc_ai::hide_phase::travelling );
+    CHECK( state->destination != liam.pos_abs() );
+    CHECK( rl_dist( here.get_bub( state->destination ), start ) >= 3 );
+    CHECK( rl_dist( here.get_bub( state->destination ), zombie.pos_bub( here ) ) >= 6 );
+
+    // With the enemy in reach the order spends the turn itself: the ordinary
+    // turn would swing at whatever is next to it instead of leaving.
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( npc_ai::hide_took_turn( liam ) );
+    CHECK( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::travelling );
+    CHECK( liam.pos_bub( here ) != start );
+    CHECK( rl_dist( liam.pos_bub( here ), here.get_bub( state->destination ) ) <
+           rl_dist( start, here.get_bub( state->destination ) ) );
+    // And it never traded a blow on the way out.
+    CHECK( zombie.get_hp() == zombie_hp );
+    CHECK( liam.rules.has_flag( ally_rule::forbid_engage ) );
+}
+
+TEST_CASE( "hide_walk_with_nothing_near_leaves_the_turn_to_the_ordinary_logic",
+           "[npc_ai][npc_ai_hide][npc_ai_orders]" )
+{
+    npc &liam = prepare_hider();
+    map &here = get_map();
+    const tripoint_bub_ms door = build_room( tripoint_bub_ms{ 71, 60, 0 }, 1 );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    REQUIRE( npc_ai::execute_hide_order( { &liam } ).success );
+    const tripoint_bub_ms start = liam.pos_bub( here );
+
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK_FALSE( npc_ai::hide_took_turn( liam ) );
+    CHECK( liam.pos_bub( here ) == start );
+    REQUIRE( liam.goto_to_this_pos.has_value() );
+}
+
+TEST_CASE( "hidden_companion_shuts_a_door_left_open_and_goes_back_to_its_tile",
+           "[npc_ai][npc_ai_hide][npc_ai_orders]" )
+{
+    npc &liam = prepare_hider();
+    map &here = get_map();
+    const tripoint_bub_ms center{ 70, 60, 0 };
+    const tripoint_bub_ms door = build_room( center, 1 );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    const npc_ai::hide_order_result result = npc_ai::execute_hide_order( { &liam } );
+    REQUIRE( result.success );
+    const tripoint_bub_ms dest = here.get_bub( result.assignments[0].second );
+    liam.setpos( here, dest );
+    liam.goto_to_this_pos = std::nullopt;
+    REQUIRE( npc_ai::process_hide( liam ) );
+    REQUIRE( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::hidden );
+    REQUIRE( liam.is_prone() );
+
+    // Somebody walks through and leaves the door open behind them.
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    Messages::clear_messages();
+    // The first turns it is left alone: they may still be coming through.
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::hidden );
+    CHECK( here.ter( door ) == ter_t_door_o );
+    calendar::turn += 2_turns;
+    CHECK( npc_ai::process_hide( liam ) );
+    const std::optional<npc_ai::hide_state> going = npc_ai::hide_state_for( liam );
+    REQUIRE( going );
+    CHECK( going->phase == npc_ai::hide_phase::closing_door );
+    CHECK( going->return_pos == liam.pos_abs() );
+    CHECK_FALSE( liam.is_prone() );
+    CHECK_FALSE( liam.is_guarding() );
+    REQUIRE( liam.goto_to_this_pos.has_value() );
+    // It heads for a tile beside the door, on the inside of the room.
+    const tripoint_bub_ms approach = here.get_bub( *liam.goto_to_this_pos );
+    CHECK( rl_dist( approach, door ) == 1 );
+    CHECK( going->room.count( here.get_abs( approach ) ) == 1 );
+    CHECK( said_either( "shut it", "cerrarla" ) );
+
+    // Standing next to it, it shuts the door and walks back to its tile.
+    liam.setpos( here, approach );
+    liam.goto_to_this_pos = std::nullopt;
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( here.ter( door ) == ter_t_door_c );
+    const std::optional<npc_ai::hide_state> back = npc_ai::hide_state_for( liam );
+    REQUIRE( back );
+    CHECK( back->phase == npc_ai::hide_phase::travelling );
+    CHECK( back->destination == here.get_abs( dest ) );
+
+    // And back on its tile it lies down again.
+    liam.setpos( here, dest );
+    liam.goto_to_this_pos = std::nullopt;
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::hidden );
+    CHECK( liam.is_prone() );
+    CHECK( liam.mission == NPC_MISSION_GUARD_ALLY );
+}
+
+TEST_CASE( "an_open_door_never_costs_the_companion_its_cover",
+           "[npc_ai][npc_ai_hide][npc_ai_orders]" )
+{
+    npc &liam = prepare_hider();
+    map &here = get_map();
+    // The only room has its door wide open: it is still a proper hideout,
+    // the flood stops at the doorway either way.
+    const tripoint_bub_ms center{ 70, 60, 0 };
+    const tripoint_bub_ms door = build_room( center, 1 );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    const npc_ai::hide_order_result result = npc_ai::execute_hide_order( { &liam } );
+    REQUIRE( result.success );
+    const std::optional<npc_ai::hide_state> state = npc_ai::hide_state_for( liam );
+    REQUIRE( state );
+    CHECK( state->enclosed );
+    CHECK( state->room.size() == 9 );
+    CHECK( state->doors.count( here.get_abs( door ) ) == 1 );
+}
+
+TEST_CASE( "a_door_trip_is_dropped_the_moment_something_shows_up",
+           "[npc_ai][npc_ai_hide][npc_ai_orders]" )
+{
+    npc &liam = prepare_hider();
+    map &here = get_map();
+    const tripoint_bub_ms center{ 70, 60, 0 };
+    const tripoint_bub_ms door = build_room( center, 1 );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    const npc_ai::hide_order_result result = npc_ai::execute_hide_order( { &liam } );
+    REQUIRE( result.success );
+    const tripoint_bub_ms dest = here.get_bub( result.assignments[0].second );
+    liam.setpos( here, dest );
+    liam.goto_to_this_pos = std::nullopt;
+    REQUIRE( npc_ai::process_hide( liam ) );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    pass_door_wait( liam );
+    REQUIRE( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::closing_door );
+
+    // A zombie in the doorway: the door stops being the problem.
+    monster &zombie = spawn_test_monster( "mon_zombie", door );
+    REQUIRE( liam.sees( here, zombie ) );
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( npc_ai::hide_state_for( liam )->phase != npc_ai::hide_phase::closing_door );
+    CHECK( liam.rules.has_flag( ally_rule::forbid_engage ) );
+}
+
+TEST_CASE( "a_door_within_reach_is_shut_the_same_turn_without_getting_up",
+           "[npc_ai][npc_ai_hide][npc_ai_orders]" )
+{
+    npc &liam = prepare_hider();
+    map &here = get_map();
+    // One-tile closet: the hideout tile is right beside the door.
+    const tripoint_bub_ms center{ 68, 60, 0 };
+    const tripoint_bub_ms door = build_room( center, 0 );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    REQUIRE( npc_ai::execute_hide_order( { &liam } ).success );
+    liam.setpos( here, center );
+    liam.goto_to_this_pos = std::nullopt;
+    REQUIRE( npc_ai::process_hide( liam ) );
+    REQUIRE( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::hidden );
+
+    // Opened again from outside: left alone at first, whoever opened it may
+    // still be stepping through.
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( here.ter( door ) == ter_t_door_o );
+    calendar::turn += 1_turns;
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( here.ter( door ) == ter_t_door_o );
+    // Two turns later, and it is shut on the spot without getting up.
+    calendar::turn += 1_turns;
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( here.ter( door ) == ter_t_door_c );
+    CHECK( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::hidden );
+    CHECK( liam.is_prone() );
+    CHECK( liam.mission == NPC_MISSION_GUARD_ALLY );
+
+    // And again: shutting one door never blocks the next one.
+    for( int i = 0; i < 2; ++i ) {
+        here.ter_set( door, ter_t_door_o );
+        rebuild_caches();
+        pass_door_wait( liam );
+        CHECK( here.ter( door ) == ter_t_door_c );
+    }
+}
+
+TEST_CASE( "the_walk_to_a_far_door_is_driven_by_the_order_itself",
+           "[npc_ai][npc_ai_hide][npc_ai_orders]" )
+{
+    npc &liam = prepare_hider();
+    map &here = get_map();
+    const tripoint_bub_ms center{ 70, 60, 0 };
+    const tripoint_bub_ms door = build_room( center, 2 );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    const npc_ai::hide_order_result result = npc_ai::execute_hide_order( { &liam } );
+    REQUIRE( result.success );
+    const tripoint_bub_ms dest = here.get_bub( result.assignments[0].second );
+    liam.setpos( here, dest );
+    liam.goto_to_this_pos = std::nullopt;
+    REQUIRE( npc_ai::process_hide( liam ) );
+    here.ter_set( door, ter_t_door_o );
+    rebuild_caches();
+    pass_door_wait( liam );
+    REQUIRE( npc_ai::hide_state_for( liam )->phase == npc_ai::hide_phase::closing_door );
+
+    // Every turn of the errand is spent walking, not waiting its turn behind
+    // whatever else the companion might feel like doing.
+    const int start_gap = rl_dist( liam.pos_bub( here ), door );
+    CHECK( npc_ai::process_hide( liam ) );
+    CHECK( npc_ai::hide_took_turn( liam ) );
+    CHECK( rl_dist( liam.pos_bub( here ), door ) < start_gap );
 }

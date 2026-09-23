@@ -34,6 +34,8 @@ enum class hide_phase : int {
     cornered,     // no other hideout: self-defence allowed until it is quiet
     evading,      // no hideout and enemies in sight: keeps its distance,
                   // never engages, until exhausted or boxed in (-> cornered)
+    closing_door, // hidden and quiet, but a door of the room was left open:
+                  // walks over, shuts it and comes back to its tile
     leaving       // follow order received inside the room: walking out to
                   // the door with door-opening still allowed, then done
 };
@@ -44,6 +46,8 @@ struct hide_state {
     // Tiles of the room chosen as hideout; empty for the fallback (an
     // interior tile away from the enemies, but not an enclosed room).
     std::set<tripoint_abs_ms> room;
+    // The room's doors, watched while hidden: one left open is an invitation.
+    std::set<tripoint_abs_ms> doors;
     bool enclosed = false;
     // Ally rule overrides as they were before the order (rule bit, override
     // enabled, override value), restored exactly on cancel.  While the order
@@ -65,6 +69,16 @@ struct hide_state {
     // Evading: turns spent keeping away; a hideout is looked for again every
     // few of them.
     int evade_ticks = 0;
+    // The hideout moved the companion itself this turn (see hide_took_turn).
+    bool turn_taken = false;
+    // Shutting a door: the door being closed and the tile to lie back down on.
+    tripoint_abs_ms door_target;
+    tripoint_abs_ms return_pos;
+    int last_door_turn = -1;
+    // A door seen open, and the turn it was first seen that way: the
+    // companion gives whoever opened it a couple of turns to come through.
+    tripoint_abs_ms door_seen;
+    int door_seen_turn = -1;
 };
 
 struct hide_order_result {
@@ -89,6 +103,13 @@ hide_order_result execute_hide_order( const std::vector<npc *> &targets );
 // Per-turn hook (npc::move): arrival, threat check, relocation.  Never
 // consumes the turn; returns true while the companion has an active hideout.
 bool process_hide( npc &who );
+
+// True when process_hide() already spent the companion's turn moving it away.
+// With an enemy in reach the ordinary turn would end in a melee attack (the
+// vanilla walk hits whatever stands on the next tile, and self-defence beats
+// the "do not engage" rule), so while running to the hideout the order drives
+// the step itself and npc::move() must stop there.  Clears the flag.
+bool hide_took_turn( const npc &who );
 
 bool is_hiding( const npc &who );
 std::optional<hide_state> hide_state_for( const npc &who );

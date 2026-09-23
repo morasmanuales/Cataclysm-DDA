@@ -1418,8 +1418,12 @@ void npc::move()
             return;
         }
         // "Escondanse": arrival at the hideout, threat check and relocation.
-        // Never consumes the turn; the guard post and the walk do the rest.
+        // With an enemy in reach it also takes the step itself, because the
+        // ordinary turn would end up attacking instead of running.
         npc_ai::process_hide( *this );
+        if( npc_ai::hide_took_turn( *this ) ) {
+            return;
+        }
         // Vehicle unloading remains a deterministic goal; ACT_MOVE_LOOT performs the hauling.
         if( !has_rescue_claim && npc_ai::process_vehicle_unload_task( *this ) ) {
             return;

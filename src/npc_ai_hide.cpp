@@ -61,6 +61,13 @@ constexpr int replan_ticks = 6;
 constexpr int leaving_timeout_ticks = 30;
 // Evading: how often a hideout is looked for again while keeping away.
 constexpr int evade_replan_ticks = 5;
+// A door left open is only worth a trip every so often: if it cannot be
+// reached or somebody keeps opening it, the companion must not loop.
+constexpr int door_retry_ticks = 20;
+// Turns a door is left alone after it is first seen open: whoever opened it
+// is probably still walking through, and shutting it in their face is worse
+// than the couple of turns it stays open.
+constexpr int door_wait_turns = 2;
 // Relocating after being found: the new room has to be a real escape, not the
 // next tile over, and it has to put some ground between them.
 constexpr int relocation_min_distance = 3;
@@ -101,6 +108,8 @@ const char *phase_name( const hide_phase phase )
             return "cornered";
         case hide_phase::evading:
             return "evading";
+        case hide_phase::closing_door:
+            return "closing_door";
         case hide_phase::leaving:
             return "leaving";
     }
@@ -250,6 +259,7 @@ std::vector<tripoint_bub_ms> route_to( map &here, const npc &who, const tripoint
 struct hideout_choice {
     std::optional<tripoint_bub_ms> tile;
     std::set<tripoint_abs_ms> room;
+    std::set<tripoint_abs_ms> doors;
     bool enclosed = false;
 };
 
@@ -397,6 +407,10 @@ hideout_choice find_hideout( npc &who, map &here, const std::set<tripoint_abs_ms
             choice.room.clear();
             for( const tripoint_bub_ms &tile : room.tiles ) {
                 choice.room.insert( here.get_abs( tile ) );
+            }
+            choice.doors.clear();
+            for( const tripoint_bub_ms &door : room.doors ) {
+                choice.doors.insert( here.get_abs( door ) );
             }
         }
     }
@@ -587,6 +601,7 @@ void send_to_hideout( npc &who, hide_state &state, map &here, const hideout_choi
 {
     state.destination = here.get_abs( *choice.tile );
     state.room = choice.room;
+    state.doors = choice.doors;
     state.enclosed = choice.enclosed;
     state.phase = hide_phase::travelling;
     state.quiet_ticks = 0;
@@ -678,10 +693,12 @@ void begin_evading( npc &who, hide_state &state, const int now )
     hide_log( who, "EVADING keeping away, engagement forbidden" );
 }
 
-// One evasion step: the adjacent tile (or the current one) farthest from the
-// nearest visible enemy; ties go to the tile nearer the player, then to one
-// under a roof.  Returns false when no tile beats standing still.
-bool evade_step( npc &who, map &here, const std::vector<tripoint_bub_ms> &hostiles )
+// The adjacent tile farthest from the nearest visible enemy; ties go to the
+// tile nearer the player, then to one under a roof.  Empty when no tile beats
+// standing still.  Occupied tiles are never returned: stepping onto a hostile
+// is an attack, which is exactly what the order is trying to avoid.
+std::optional<tripoint_bub_ms> best_evade_tile( npc &who, map &here,
+        const std::vector<tripoint_bub_ms> &hostiles )
 {
     const tripoint_bub_ms origin = who.pos_bub( here );
     const tripoint_bub_ms player_pos = get_player_character().pos_bub( here );
@@ -698,8 +715,10 @@ bool evade_step( npc &who, map &here, const std::vector<tripoint_bub_ms> &hostil
     };
     tripoint_bub_ms best = origin;
     int best_score = score( origin );
+    creature_tracker &creatures = get_creature_tracker();
     for( const tripoint_bub_ms &n : here.points_in_radius( origin, 1, 0 ) ) {
-        if( n == origin || !who.can_move_to( n, true ) || g->is_dangerous_tile( n ) ) {
+        if( n == origin || !who.can_move_to( n, true ) || g->is_dangerous_tile( n ) ||
+            creatures.creature_at( n ) != nullptr ) {
             continue;
         }
         const int n_score = score( n );
@@ -709,10 +728,158 @@ bool evade_step( npc &who, map &here, const std::vector<tripoint_bub_ms> &hostil
         }
     }
     if( best == origin ) {
+        return std::nullopt;
+    }
+    return best;
+}
+
+bool evade_step( npc &who, map &here, const std::vector<tripoint_bub_ms> &hostiles )
+{
+    const std::optional<tripoint_bub_ms> step = best_evade_tile( who, here, hostiles );
+    if( !step ) {
         return false;
     }
-    who.goto_to_this_pos = here.get_abs( best );
+    who.goto_to_this_pos = here.get_abs( *step );
     return true;
+}
+
+// Spend the companion's turn getting away, and say so, so npc::move() stops
+// before the combat logic.  Towards the hideout when the route is clear,
+// otherwise simply away from the enemies.  Never steps onto a creature.
+bool take_flight_turn( npc &who, map &here, hide_state &state,
+                       const std::vector<tripoint_bub_ms> &hostiles, const bool towards_hideout )
+{
+    creature_tracker &creatures = get_creature_tracker();
+    const tripoint_bub_ms destination = here.get_bub( state.destination );
+    if( towards_hideout && who.pos_bub( here ) != destination &&
+        who.update_path( destination ) && !who.path.empty() &&
+        creatures.creature_at( who.path.front() ) == nullptr ) {
+        hide_log( who, string_format( "FLEE_STEP route to=%s", who.path.front().to_string() ) );
+        who.move_to_next();
+        state.turn_taken = true;
+        return true;
+    }
+    const std::optional<tripoint_bub_ms> step = best_evade_tile( who, here, hostiles );
+    if( !step ) {
+        hide_log( who, "FLEE_STEP blocked" );
+        return false;
+    }
+    hide_log( who, string_format( "FLEE_STEP away to=%s", step->to_string() ) );
+    who.move_to( *step );
+    state.turn_taken = true;
+    return true;
+}
+
+// A door of the hideout that somebody left open (the player walked through
+// and did not shut it).  The nearest one, or nothing when all are closed.
+std::optional<tripoint_bub_ms> open_room_door( npc &who, map &here, const hide_state &state )
+{
+    std::optional<tripoint_bub_ms> nearest;
+    int best = std::numeric_limits<int>::max();
+    for( const tripoint_abs_ms &abs_door : state.doors ) {
+        const tripoint_bub_ms door = here.get_bub( abs_door );
+        // check_only: false for a door already shut, or one with nothing to
+        // close (a broken frame, a curtain someone tore down).
+        if( !here.close_door( door, true, true ) ) {
+            continue;
+        }
+        const int dist = rl_dist( who.pos_bub( here ), door );
+        if( dist < best ) {
+            best = dist;
+            nearest = door;
+        }
+    }
+    return nearest;
+}
+
+// Where to stand to shut `door`: a tile beside it, inside the room when it
+// can be, and one the companion can actually walk to.
+std::optional<tripoint_bub_ms> door_approach_tile( npc &who, map &here, const hide_state &state,
+        const tripoint_bub_ms &door )
+{
+    std::optional<tripoint_bub_ms> best;
+    int best_score = std::numeric_limits<int>::max();
+    for( const tripoint_bub_ms &tile : here.points_in_radius( door, 1, 0 ) ) {
+        if( tile == door || !standable_interior_tile( here, who, tile ) ) {
+            continue;
+        }
+        if( who.pos_bub( here ) != tile && route_to( here, who, tile ).empty() ) {
+            continue;
+        }
+        // Inside the room first: shutting it from the doorway side leaves the
+        // companion outside its own hideout.
+        const int score = ( state.room.count( here.get_abs( tile ) ) != 0 ? 0 : 100 ) +
+                          rl_dist( who.pos_bub( here ), tile );
+        if( score < best_score ) {
+            best_score = score;
+            best = tile;
+        }
+    }
+    return best;
+}
+
+void begin_closing_door( npc &who, hide_state &state, map &here, const tripoint_bub_ms &door,
+                         const tripoint_bub_ms &approach )
+{
+    state.phase = hide_phase::closing_door;
+    state.door_target = here.get_abs( door );
+    state.return_pos = who.pos_abs();
+    // The cooldown is for trips that fail; a door shut and reopened is
+    // answered at once.
+    state.last_door_turn = -1;
+    state.stuck_ticks = 0;
+    state.last_pos = who.pos_abs();
+    stand_up( who );
+    if( who.is_guarding() ) {
+        talk_function::stop_guard( who );
+    }
+    if( !who.is_walking_with() ) {
+        who.set_attitude( NPCATT_FOLLOW );
+    }
+    who.goto_to_this_pos = here.get_abs( approach );
+    hide_log( who, string_format( "CLOSE_DOOR door=%s approach=%s return=%s",
+                                  state.door_target.to_string(), approach.to_string(),
+                                  state.return_pos.to_string() ) );
+    say_command_reply( who, localized_ai_message( _( "That door is open.  I'll shut it." ),
+                       "Esa puerta se ha quedado abierta.  Voy a cerrarla." ) );
+}
+
+// Back to the tile it was lying on, with the room it already had.
+void return_to_hideout_tile( npc &who, hide_state &state, map &here )
+{
+    hideout_choice back;
+    back.tile = here.get_bub( state.return_pos );
+    back.room = state.room;
+    back.doors = state.doors;
+    back.enclosed = state.enclosed;
+    send_to_hideout( who, state, here, back );
+}
+
+// One step towards `dest` spent from the companion's own turn, so the errand
+// is not queued behind whatever else the ordinary turn decides to do.
+bool take_walk_turn( npc &who, map &here, hide_state &state, const tripoint_bub_ms &dest )
+{
+    if( who.pos_bub( here ) == dest || !who.update_path( dest ) || who.path.empty() ||
+        get_creature_tracker().creature_at( who.path.front() ) != nullptr ) {
+        return false;
+    }
+    who.move_to_next();
+    state.turn_taken = true;
+    return true;
+}
+
+// An enemy this close would end the turn in melee if the ordinary npc logic
+// ran: it is the companion's own turn that has to be spent walking away.
+bool enemy_within_reach( const npc &who, map &here,
+                         const std::vector<tripoint_bub_ms> &hostiles )
+{
+    const tripoint_bub_ms origin = who.pos_bub( here );
+    for( const tripoint_bub_ms &hostile : hostiles ) {
+        if( rl_dist( origin, hostile ) <= 2 ) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -776,7 +943,16 @@ hide_order_result execute_hide_order( const std::vector<npc *> &raw_targets )
         apply_rules( *who, state );
 
         const std::vector<tripoint_bub_ms> hostiles = visible_hostiles( *who, here, threat_scan_radius );
-        const hideout_choice choice = find_hideout( *who, here, reserved, {}, hostiles );
+        // Ordered while something is on them: the hideout has to be somewhere
+        // else.  Without this the room they are standing and fighting in
+        // counts as a hideout, the order "arrives" on the spot and nothing
+        // changes, which reads as the companion ignoring it.
+        hideout_limits limits;
+        if( !hostiles.empty() ) {
+            limits.min_from_origin = relocation_min_distance;
+            limits.min_from_hostiles = relocation_min_hostile_distance;
+        }
+        const hideout_choice choice = find_hideout( *who, here, reserved, {}, hostiles, limits );
         hide_log( *who, string_format( "ORDER hostiles_visible=%zu told_not_to_open_doors=%d result=%s",
                                        hostiles.size(), told_not_to_open_doors ? 1 : 0,
                                        !choice.tile ? "NONE" : choice.enclosed ? "ROOM" : "FALLBACK" ) );
@@ -916,6 +1092,57 @@ bool process_hide( npc &who )
             // Something (an activity, a scare) dropped the walk: resume it.
             who.goto_to_this_pos = state.destination;
         }
+        if( enemy_within_reach( who, here, hostiles ) ) {
+            take_flight_turn( who, here, state, hostiles, true );
+        }
+        return true;
+    }
+
+    if( state.phase == hide_phase::closing_door ) {
+        const tripoint_bub_ms door = here.get_bub( state.door_target );
+        if( who.pos_abs() == state.last_pos ) {
+            ++state.stuck_ticks;
+        } else {
+            state.stuck_ticks = 0;
+            state.last_pos = who.pos_abs();
+        }
+        hide_log( who, string_format( "TICK phase=closing_door door=%s dist=%d stuck=%d threat=%d",
+                                      state.door_target.to_string(),
+                                      rl_dist( who.pos_bub( here ), door ), state.stuck_ticks,
+                                      static_cast<int>( threat ) ) );
+        // Anything shows up and the door stops mattering: back to the tile,
+        // and the hidden branch decides from there next turn.
+        if( threat != threat_level::none || !hostiles.empty() ) {
+            hide_log( who, "CLOSE_DOOR aborted, threat" );
+            return_to_hideout_tile( who, state, here );
+            return true;
+        }
+        if( rl_dist( who.pos_bub( here ), door ) <= 1 ) {
+            if( here.close_door( door, true, true ) ) {
+                // The vanilla helper: it refuses politely when a creature, a
+                // vehicle or a pile of loot is in the doorway.
+                doors::close_door( here, who, door );
+                hide_log( who, string_format( "CLOSE_DOOR shut=%d",
+                                              here.close_door( door, true, true ) ? 0 : 1 ) );
+            }
+            return_to_hideout_tile( who, state, here );
+            return true;
+        }
+        if( state.stuck_ticks >= replan_ticks ) {
+            hide_log( who, "CLOSE_DOOR gave up" );
+            return_to_hideout_tile( who, state, here );
+            return true;
+        }
+        if( !who.goto_to_this_pos ) {
+            const std::optional<tripoint_bub_ms> approach =
+                door_approach_tile( who, here, state, door );
+            if( !approach ) {
+                return_to_hideout_tile( who, state, here );
+                return true;
+            }
+            who.goto_to_this_pos = here.get_abs( *approach );
+        }
+        take_walk_turn( who, here, state, here.get_bub( *who.goto_to_this_pos ) );
         return true;
     }
 
@@ -953,6 +1180,7 @@ bool process_hide( npc &who )
             state.last_pos = who.pos_abs();
         }
         const bool moved_away = !hostiles.empty() && evade_step( who, here, hostiles );
+        const bool close_by = enemy_within_reach( who, here, hostiles );
         hide_log( who, string_format( "TICK phase=evading hostiles=%zu threat=%d moved=%d stuck=%d "
                                       "stamina=%d quiet=%d",
                                       hostiles.size(), static_cast<int>( threat ), moved_away ? 1 : 0,
@@ -973,6 +1201,9 @@ bool process_hide( npc &who )
             return true;
         }
         run_or_walk( who );
+        if( close_by && moved_away ) {
+            take_flight_turn( who, here, state, hostiles, false );
+        }
         if( hostiles.empty() ) {
             who.goto_to_this_pos = std::nullopt;
             if( ++state.quiet_ticks < cornered_quiet_ticks ) {
@@ -1032,6 +1263,46 @@ bool process_hide( npc &who )
             if( !who.is_prone() ) {
                 lie_down( who );
             }
+            // A door of the room left open: shut it the same turn when it is
+            // within arm's reach, otherwise get up, walk over and come back.
+            // Only with nothing in sight at all: a trip to the doorway with
+            // an enemy wandering about is how a hidden companion is found.
+            if( state.enclosed && hostiles.empty() && who.pos_abs() == state.destination &&
+                ( state.last_door_turn < 0 || now - state.last_door_turn >= door_retry_ticks ) ) {
+                const std::optional<tripoint_bub_ms> door = open_room_door( who, here, state );
+                if( !door ) {
+                    // Everything shut: forget any door being waited on.
+                    state.door_seen_turn = -1;
+                } else if( state.door_seen_turn < 0 || state.door_seen != here.get_abs( *door ) ) {
+                    // First turn it is seen open: give whoever opened it time
+                    // to come through before shutting it behind them.
+                    state.door_seen = here.get_abs( *door );
+                    state.door_seen_turn = now;
+                    hide_log( who, string_format( "DOOR_OPEN %s, waiting %d turns",
+                                                  state.door_seen.to_string(), door_wait_turns ) );
+                } else if( now - state.door_seen_turn >= door_wait_turns ) {
+                    state.door_seen_turn = -1;
+                    if( rl_dist( who.pos_bub( here ), *door ) <= 1 ) {
+                        // Within reach: no trip and no getting up.
+                        doors::close_door( here, who, *door );
+                        const bool shut = !here.close_door( *door, true, true );
+                        hide_log( who, string_format( "CLOSE_DOOR reach shut=%d", shut ? 1 : 0 ) );
+                        if( !shut ) {
+                            state.last_door_turn = now;
+                        }
+                    } else {
+                        const std::optional<tripoint_bub_ms> approach =
+                            door_approach_tile( who, here, state, *door );
+                        if( approach ) {
+                            begin_closing_door( who, state, here, *door, *approach );
+                        } else {
+                            // Cannot get to it; do not try again for a while.
+                            state.last_door_turn = now;
+                            hide_log( who, "CLOSE_DOOR unreachable" );
+                        }
+                    }
+                }
+            }
             return true;
         }
         // Found out.  The answer is another room, even with the enemy right
@@ -1064,15 +1335,11 @@ bool process_hide( npc &who )
             // Just relocated: give the walk a few turns before trying again.
             return true;
         }
-        if( threat == threat_level::contact ) {
-            // Nowhere to run to and it is already on top of the companion.
-            become_cornered( who, state, now );
-            say_command_reply( who, localized_ai_message( _( "It's on me!  I'll defend myself!" ),
-                               "¡Lo tengo encima!  ¡Me defiendo!" ) );
-            return true;
-        }
-        // Nowhere better: get away from it without engaging; it fights only
-        // once exhausted or boxed in.
+        // No other room: get out of this one and keep away without engaging,
+        // enemy in contact or not.  Being next to something is not the same
+        // as being cornered, and standing there trading blows is the one
+        // thing the order is meant to prevent; it fights only once exhausted
+        // or truly boxed in, which the evading phase decides.
         begin_evading( who, state, now );
         say_command_reply( who, localized_ai_message(
                                _( "They've found me and there's nowhere else.  I'll keep away." ),
@@ -1126,6 +1393,16 @@ bool process_hide( npc &who )
     apply_rules( who, state );
     say_command_reply( who, localized_ai_message( _( "Quiet again.  Staying hidden." ),
                        "Vuelve a estar tranquilo.  Sigo escondido." ) );
+    return true;
+}
+
+bool hide_took_turn( const npc &who )
+{
+    const auto found = hideouts.find( npc_key( who ) );
+    if( found == hideouts.end() || !found->second.turn_taken ) {
+        return false;
+    }
+    found->second.turn_taken = false;
     return true;
 }
 
